@@ -110,6 +110,11 @@ export class DemoTransport implements StudioTransport {
   private readonly feed: FeedItem[] = [];
   private demoBoundaries =
     "Keep edits snappy; never cut punchlines; keep white rounded seam card clean.";
+  private demoModels = {
+    active_provider: "gemini",
+    scan_model: "gemini-2.5-flash",
+    editor_model: "gemini-2.5-flash",
+  };
   private readonly keysPresent: Record<string, boolean> = {
     gemini: false,
     groq: false,
@@ -587,11 +592,7 @@ export class DemoTransport implements StudioTransport {
   async getSettings(): Promise<SettingsResponse> {
     return {
       settings: {
-        models: {
-          active_provider: "gemini",
-          scan_model: "gemini-2.5-flash",
-          editor_model: "gemini-2.5-flash",
-        },
+        models: { ...this.demoModels },
         alignment: {
           whisper_model: "medium",
           forced_aligner: "auto",
@@ -605,6 +606,16 @@ export class DemoTransport implements StudioTransport {
   }
 
   async saveSettings(patch: Record<string, unknown>): Promise<SettingsResponse> {
+    const mod = patch.models as
+      | { active_provider?: string; scan_model?: string; editor_model?: string }
+      | undefined;
+    if (mod) {
+      this.demoModels = {
+        active_provider: mod.active_provider ?? this.demoModels.active_provider,
+        scan_model: mod.scan_model ?? this.demoModels.scan_model,
+        editor_model: mod.editor_model ?? this.demoModels.editor_model,
+      };
+    }
     const exp = patch.export as { editor_boundaries?: string } | undefined;
     if (exp?.editor_boundaries !== undefined) {
       this.demoBoundaries = exp.editor_boundaries;

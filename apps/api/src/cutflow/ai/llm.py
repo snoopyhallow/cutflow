@@ -183,6 +183,61 @@ def _call_anthropic(
     return "".join(str(b.get("text", "")) for b in blocks if b.get("type") == "text")
 
 
+_DEFAULT_PROVIDER_MODELS: dict[str, str] = {
+    "gemini": "gemini-2.5-flash",
+    "anthropic": "claude-sonnet-4-5",
+    "openai": "gpt-4o-mini",
+    "groq": "llama-3.3-70b-versatile",
+    "ollama": "qwen2.5:7b",
+}
+_CLOUD_PROVIDER_ORDER: tuple[str, ...] = ("gemini", "anthropic", "openai", "groq")
+
+
+def _model_matches_provider(provider: str, model_name: str) -> bool:
+    """Prevent stale cross-provider model IDs (e.g. passing 'gemini-2.5-flash' to Anthropic)."""
+    m = model_name.strip().lower()
+    if not m:
+        return False
+    if provider == "gemini":
+        return m.startswith("gemini")
+    if provider == "anthropic":
+        return m.startswith("claude")
+    if provider == "openai":
+        return not m.startswith(("gemini", "claude", "llama-"))
+    if provider == "groq":
+        return not m.startswith(("gemini", "claude", "gpt-"))
+    return True
+
+
+def _resolve_provider_and_model(
+    cfg: config.Settings,
+    *,
+    role: Literal["scan", "editor"],
+    explicit_provider: str | None,
+    explicit_model: str | None,
+) -> tuple[str, str]:
+    active = explicit_provider or cfg.models.active_provider
+    # Smart auto-fallback: if the selected cloud provider has no key set yet, automatically
+    # use whichever cloud provider key the user pasted into OS Keyring / environment.
+    if explicit_provider is None and active in _CLOUD_PROVIDER_ORDER and not get_secret(active):
+        for candidate in _CLOUD_PROVIDER_ORDER:
+            if get_secret(candidate):
+                active = candidate
+                break
+
+    provider_cfg = cfg.models.providers.get(active)
+    role_model = cfg.models.scan_model if role == "scan" else cfg.models.editor_model
+    if explicit_model:
+        chosen = explicit_model
+    elif _model_matches_provider(active, role_model):
+        chosen = role_model
+    elif provider_cfg and provider_cfg.model:
+        chosen = provider_cfg.model
+    else:
+        chosen = _DEFAULT_PROVIDER_MODELS.get(active, "")
+    return active, chosen
+
+
 def complete_json(
     user_prompt: str,
     *,
@@ -195,13 +250,13 @@ def complete_json(
 ) -> Any:
     """Invoke the configured LLM provider with content-hash caching and return parsed JSON."""
     cfg = config.load()
-    active_provider = provider or cfg.models.active_provider
-    provider_cfg = cfg.models.providers.get(active_provider)
-    chosen_model = (
-        model
-        or (cfg.models.scan_model if role == "scan" else cfg.models.editor_model)
-        or (provider_cfg.model if provider_cfg else "")
+    active_provider, chosen_model = _resolve_provider_and_model(
+        cfg,
+        role=role,
+        explicit_provider=provider,
+        explicit_model=model,
     )
+    provider_cfg = cfg.models.providers.get(active_provider)
 
     image_hash = hashlib.sha256(image_b64.encode("ascii")).hexdigest()[:16] if image_b64 else ""
     cache_key = _compute_cache_key(
@@ -239,6 +294,18 @@ def complete_json(
             raise LLMError("No anthropic key configured in OS keyring or environment.")
         raw = _call_anthropic(
             key, chosen_model or "claude-sonnet-4-5", system_prompt, user_prompt, image_b64
+        )
+    elif active_provider == "groq":
+        key = get_secret("groq")
+        if not key:
+            raise LLMError("No groq key configured in OS keyring or environment.")
+        raw = _call_openai_compat(
+            "https://api.groq.com/openai/v1",
+            key,
+            chosen_model or "llama-3.3-70b-versatile",
+            system_prompt,
+            user_prompt,
+            None,
         )
     elif active_provider == "ollama":
         base_url = (provider_cfg.base_url if provider_cfg and provider_cfg.base_url else None) or (

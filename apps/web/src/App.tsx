@@ -14,7 +14,10 @@ import { CreatorsPage } from "./pages/CreatorsPage";
 import { DashboardPage } from "./pages/DashboardPage";
 import { EditorStudioPage } from "./pages/EditorStudioPage";
 import { ExportsPage } from "./pages/ExportsPage";
-import { SettingsPage } from "./pages/SettingsPage";
+import {
+  SettingsPage,
+  type ModelRoutingState,
+} from "./pages/SettingsPage";
 import { useTimelineStore } from "./state/timelineStore";
 import {
   createTransport,
@@ -50,6 +53,12 @@ export default function App() {
   const [activeProjectId, setActiveProjectId] = useState<string | null>(null);
   const [activePeaks, setActivePeaks] = useState<ProjectPeaks | null>(null);
   const [editorBoundaries, setEditorBoundaries] = useState<string>("");
+  const [modelRouting, setModelRouting] = useState<ModelRoutingState>({
+    active_provider: "gemini",
+    scan_model: "gemini-2.5-flash",
+    editor_model: "gemini-2.5-flash",
+    ollama_url: "http://127.0.0.1:11434",
+  });
   const [keysPresent, setKeysPresent] = useState<Record<string, boolean>>({});
   const [statusMessage, setStatusMessage] = useState<string>("");
   const sseUnsubsRef = useRef<Map<string, () => void>>(new Map());
@@ -94,6 +103,22 @@ export default function App() {
     setFeedItems(loadedFeed);
     setStorage(loadedStorage);
     setKeysPresent(loadedSettings.keys_present);
+    const modCfg = loadedSettings.settings?.models as
+      | {
+          active_provider?: ModelRoutingState["active_provider"];
+          scan_model?: string;
+          editor_model?: string;
+          providers?: { ollama?: { base_url?: string } };
+        }
+      | undefined;
+    if (modCfg) {
+      setModelRouting({
+        active_provider: modCfg.active_provider ?? "gemini",
+        scan_model: modCfg.scan_model ?? "gemini-2.5-flash",
+        editor_model: modCfg.editor_model ?? "gemini-2.5-flash",
+        ollama_url: modCfg.providers?.ollama?.base_url ?? "http://127.0.0.1:11434",
+      });
+    }
     const expCfg = loadedSettings.settings?.export as
       | { editor_boundaries?: string }
       | undefined;
@@ -527,6 +552,7 @@ export default function App() {
           <SettingsPage
             transport={transport}
             keysPresent={keysPresent}
+            initialModels={modelRouting}
             initialBoundaries={editorBoundaries}
             onRefresh={async () => {
               await refreshWorkspace(transport);

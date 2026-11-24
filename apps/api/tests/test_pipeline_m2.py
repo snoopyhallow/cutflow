@@ -164,6 +164,31 @@ def test_llm_content_hash_cache_avoids_duplicate_api_calls(
     assert calls["count"] == 1
 
 
+def test_llm_auto_selects_configured_claude_key_and_compatible_model(
+    cutflow_home: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    captured: dict[str, Any] = {}
+
+    def fake_anthropic(api_key: str, model: str, *_args: Any, **_kwargs: Any) -> str:
+        captured["api_key"] = api_key
+        captured["model"] = model
+        return '{"ok": true}'
+
+    monkeypatch.delenv("CUTFLOW_GEMINI_KEY", raising=False)
+    monkeypatch.setenv("CUTFLOW_ANTHROPIC_KEY", "sk-ant-test-key")
+    monkeypatch.setattr(llm_module.config.load().models, "active_provider", "gemini")
+    monkeypatch.setattr(
+        "cutflow.ai.llm.get_secret",
+        lambda k: "sk-ant-test-key" if k == "anthropic" else None,
+    )
+    monkeypatch.setattr(llm_module, "_call_anthropic", fake_anthropic)
+
+    res = complete_json("test auto provider", use_cache=False)
+    assert res == {"ok": True}
+    assert captured["api_key"] == "sk-ant-test-key"
+    assert captured["model"].startswith("claude")
+
+
 @pytest.mark.skipif(not HAS_FFMPEG, reason="ffmpeg/ffprobe required")
 def test_end_to_end_upload_pipeline_media_peaks_sse_and_raw_vod_archive(
     client: TestClient, tmp_path: Path

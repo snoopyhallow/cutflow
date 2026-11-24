@@ -1,0 +1,32 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+.pytest_cache/
+.ruff_cache/
+dist/
+build/
+
+# Node / Frontend
+node_modules/
+apps/web/dist/
+apps/web/dist-demo/
+apps/web/.vite/
+playwright-report/
+test-results/
+
+# Local runtime & secrets
+.env
+.env.local
+*.db
+*.db-journal
+*.db-wal
+*.log
+.cutflow/
+
+# OS / IDE
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/

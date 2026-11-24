@@ -1,0 +1,196 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://cutflow.dev/schemas/timeline.v1.schema.json",
+  "title": "TimelineProject",
+  "description": "Canonical non-destructive Edit Decision List (EDL v1) shared between CutFlow web NLE, AI Co-Editor, and FFmpeg compiler.",
+  "type": "object",
+  "required": ["schemaVersion", "projectId", "sourceId", "output", "tracks"],
+  "additionalProperties": false,
+  "properties": {
+    "schemaVersion": { "const": 1 },
+    "projectId": { "type": "string", "minLength": 1 },
+    "sourceId": { "type": "string", "minLength": 1 },
+    "profileId": { "type": ["string", "null"], "default": null },
+    "title": { "type": "string", "default": "" },
+    "status": {
+      "type": "string",
+      "enum": ["draft", "approved", "exported", "posted", "archived"],
+      "default": "draft"
+    },
+    "sourceDurationMs": { "type": "integer", "minimum": 0, "default": 0 },
+    "sourceWidth": { "type": "integer", "minimum": 2, "default": 1920 },
+    "sourceHeight": { "type": "integer", "minimum": 2, "default": 1080 },
+    "output": {
+      "type": "object",
+      "required": ["ratio", "quality", "speedPreset", "fps", "loudnessLufs"],
+      "additionalProperties": false,
+      "properties": {
+        "ratio": { "type": "string", "enum": ["9:16", "1:1", "16:9"] },
+        "quality": { "type": "string", "enum": ["720p", "1080p", "1440p", "4k"] },
+        "speedPreset": { "type": "string", "enum": ["draft", "final"] },
+        "fps": { "type": "integer", "minimum": 15, "maximum": 120 },
+        "loudnessLufs": { "type": "number", "minimum": -36, "maximum": -5 }
+      }
+    },
+    "tracks": {
+      "type": "object",
+      "required": ["video", "audio", "subtitles", "overlays"],
+      "additionalProperties": false,
+      "properties": {
+        "video": {
+          "type": "object",
+          "required": ["clips", "framing"],
+          "additionalProperties": false,
+          "properties": {
+            "coldOpen": {
+              "type": ["object", "null"],
+              "default": null,
+              "required": ["enabled", "sourceStartMs", "durationMs"],
+              "additionalProperties": false,
+              "properties": {
+                "enabled": { "type": "boolean" },
+                "sourceStartMs": { "type": "integer", "minimum": 0 },
+                "durationMs": { "type": "integer", "minimum": 500, "maximum": 4000 },
+                "fadeOutMs": { "type": "integer", "minimum": 0, "maximum": 500, "default": 120 }
+              }
+            },
+            "clips": {
+              "type": "array",
+              "minItems": 1,
+              "items": {
+                "type": "object",
+                "required": ["id", "sourceStartMs", "sourceEndMs"],
+                "additionalProperties": false,
+                "properties": {
+                  "id": { "type": "string", "minLength": 1 },
+                  "sourceStartMs": { "type": "integer", "minimum": 0 },
+                  "sourceEndMs": { "type": "integer", "minimum": 1 }
+                }
+              }
+            },
+            "framing": {
+              "type": "array",
+              "minItems": 1,
+              "items": {
+                "type": "object",
+                "required": ["id", "timelineStartMs", "timelineEndMs", "mode"],
+                "additionalProperties": false,
+                "properties": {
+                  "id": { "type": "string", "minLength": 1 },
+                  "timelineStartMs": { "type": "integer", "minimum": 0 },
+                  "timelineEndMs": { "type": "integer", "minimum": 1 },
+                  "mode": { "type": "string", "enum": ["split", "fit", "centre", "crop"] },
+                  "splitRatio": { "type": "number", "minimum": 0.2, "maximum": 0.65, "default": 0.35 },
+                  "camBox": { "$ref": "#/$defs/normalizedBox" },
+                  "gameBox": { "$ref": "#/$defs/normalizedBox" }
+                }
+              }
+            }
+          }
+        },
+        "audio": {
+          "type": "object",
+          "required": ["gainDb", "normalizeLufs"],
+          "additionalProperties": false,
+          "properties": {
+            "gainDb": { "type": "number", "minimum": -24, "maximum": 24, "default": 0 },
+            "normalizeLufs": { "type": "number", "minimum": -36, "maximum": -5, "default": -14 },
+            "bgm": {
+              "type": ["object", "null"],
+              "default": null,
+              "additionalProperties": false,
+              "properties": {
+                "assetId": { "type": "string" },
+                "gainDb": { "type": "number", "default": -18 },
+                "duckingEnabled": { "type": "boolean", "default": true }
+              }
+            }
+          }
+        },
+        "subtitles": {
+          "type": "object",
+          "required": ["enabled", "style", "censorProfanity", "marginVRatio", "muteRanges", "words"],
+          "additionalProperties": false,
+          "properties": {
+            "enabled": { "type": "boolean" },
+            "style": {
+              "type": "object",
+              "required": ["preset", "revealMode", "font", "fontSizeScale", "primaryColor", "accentColor", "outlineColor"],
+              "additionalProperties": false,
+              "properties": {
+                "preset": { "type": "string", "enum": ["bold_pop", "karaoke_fill", "clean_lower", "boxed"] },
+                "revealMode": { "type": "string", "enum": ["group", "progressive", "single_word"] },
+                "font": { "type": "string", "minLength": 1 },
+                "fontSizeScale": { "type": "number", "minimum": 0.5, "maximum": 2.0 },
+                "primaryColor": { "type": "string", "pattern": "^#[0-9A-Fa-f]{6}$" },
+                "accentColor": { "type": "string", "pattern": "^#[0-9A-Fa-f]{6}$" },
+                "outlineColor": { "type": "string", "pattern": "^#[0-9A-Fa-f]{6}$" }
+              }
+            },
+            "censorProfanity": { "type": "boolean" },
+            "marginVRatio": { "type": "number", "minimum": 0.05, "maximum": 0.85 },
+            "muteRanges": {
+              "type": "array",
+              "items": {
+                "type": "array",
+                "prefixItems": [
+                  { "type": "integer", "minimum": 0 },
+                  { "type": "integer", "minimum": 1 }
+                ],
+                "minItems": 2,
+                "maxItems": 2
+              }
+            },
+            "words": {
+              "type": "array",
+              "items": {
+                "type": "object",
+                "required": ["id", "text", "startMs", "endMs"],
+                "additionalProperties": false,
+                "properties": {
+                  "id": { "type": "string", "minLength": 1 },
+                  "text": { "type": "string", "minLength": 1 },
+                  "startMs": { "type": "integer", "minimum": 0 },
+                  "endMs": { "type": "integer", "minimum": 1 },
+                  "speaker": { "type": ["string", "null"], "default": null }
+                }
+              }
+            }
+          }
+        },
+        "overlays": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "required": ["id", "kind", "text", "startMs", "endMs"],
+            "additionalProperties": false,
+            "properties": {
+              "id": { "type": "string", "minLength": 1 },
+              "kind": { "type": "string", "enum": ["seam_card_white", "hook_banner_dark", "cta_pill"] },
+              "text": { "type": "string" },
+              "startMs": { "type": "integer", "minimum": 0 },
+              "endMs": { "type": "integer", "minimum": 1 },
+              "yAnchor": { "type": "string", "enum": ["split_seam", "top", "bottom"], "default": "split_seam" },
+              "yOffsetRatio": { "type": "number", "minimum": -0.5, "maximum": 0.5, "default": 0.0 },
+              "maxLines": { "type": "integer", "minimum": 1, "maximum": 4, "default": 2 }
+            }
+          }
+        }
+      }
+    }
+  },
+  "$defs": {
+    "normalizedBox": {
+      "type": ["object", "null"],
+      "default": null,
+      "required": ["x", "y", "w", "h"],
+      "additionalProperties": false,
+      "properties": {
+        "x": { "type": "number", "minimum": 0, "maximum": 1 },
+        "y": { "type": "number", "minimum": 0, "maximum": 1 },
+        "w": { "type": "number", "minimum": 0.05, "maximum": 1 },
+        "h": { "type": "number", "minimum": 0.05, "maximum": 1 }
+      }
+    }
+  }
+}

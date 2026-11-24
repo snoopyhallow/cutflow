@@ -1,0 +1,85 @@
+{
+  "schemaVersion": 1,
+  "projectId": "clip_demo_001",
+  "sourceId": "src_demo_001",
+  "profileId": "general-gaming-streamer",
+  "title": "Streamer Can't Believe The Gas Prices In GTA 6",
+  "status": "draft",
+  "sourceDurationMs": 120000,
+  "sourceWidth": 1920,
+  "sourceHeight": 1080,
+  "output": {
+    "ratio": "9:16",
+    "quality": "1080p",
+    "speedPreset": "final",
+    "fps": 60,
+    "loudnessLufs": -14.0
+  },
+  "tracks": {
+    "video": {
+      "coldOpen": {
+        "enabled": true,
+        "sourceStartMs": 24000,
+        "durationMs": 1500,
+        "fadeOutMs": 120
+      },
+      "clips": [
+        { "id": "v1", "sourceStartMs": 10000, "sourceEndMs": 30000 }
+      ],
+      "framing": [
+        {
+          "id": "f1",
+          "timelineStartMs": 0,
+          "timelineEndMs": 21500,
+          "mode": "split",
+          "splitRatio": 0.35,
+          "camBox": { "x": 0.02, "y": 0.3, "w": 0.24, "h": 0.26 },
+          "gameBox": null
+        }
+      ]
+    },
+    "audio": {
+      "gainDb": 0.0,
+      "normalizeLufs": -14.0,
+      "bgm": null
+    },
+    "subtitles": {
+      "enabled": true,
+      "style": {
+        "preset": "bold_pop",
+        "revealMode": "progressive",
+        "font": "Montserrat-ExtraBold",
+        "fontSizeScale": 1.0,
+        "primaryColor": "#FFFFFF",
+        "accentColor": "#FFE500",
+        "outlineColor": "#000000"
+      },
+      "censorProfanity": true,
+      "marginVRatio": 0.22,
+      "muteRanges": [],
+      "words": [
+        { "id": "w1", "text": "No", "startMs": 1700, "endMs": 1980, "speaker": "S1" },
+        { "id": "w2", "text": "way", "startMs": 1980, "endMs": 2320, "speaker": "S1" },
+        { "id": "w3", "text": "this", "startMs": 2320, "endMs": 2580, "speaker": "S1" },
+        { "id": "w4", "text": "game", "startMs": 2580, "endMs": 2940, "speaker": "S1" },
+        { "id": "w5", "text": "is", "startMs": 2940, "endMs": 3180, "speaker": "S1" },
+        { "id": "w6", "text": "real!", "startMs": 3180, "endMs": 3700, "speaker": "S1" },
+        { "id": "w7", "text": "Look", "startMs": 9500, "endMs": 9820, "speaker": "S1" },
+        { "id": "w8", "text": "at", "startMs": 9820, "endMs": 10020, "speaker": "S1" },
+        { "id": "w9", "text": "that!", "startMs": 10020, "endMs": 10600, "speaker": "S1" }
+      ]
+    },
+    "overlays": [
+      {
+        "id": "ov1",
+        "kind": "seam_card_white",
+        "text": "Streamer Can't Believe The Gas Prices In GTA 6",
+        "startMs": 0,
+        "endMs": 21500,
+        "yAnchor": "split_seam",
+        "yOffsetRatio": 0.0,
+        "maxLines": 2
+      }
+    ]
+  }
+}

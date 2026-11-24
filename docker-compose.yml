@@ -1,0 +1,16 @@
+services:
+  api:
+    build:
+      context: .
+      dockerfile: apps/api/Dockerfile
+    ports:
+      - "127.0.0.1:8010:8010"
+    environment:
+      - CUTFLOW_HOME=/data
+      - CUTFLOW_INBOX_DIR=/inbox
+    volumes:
+      - cutflow_data:/data
+      - ./inbox:/inbox
+
+volumes:
+  cutflow_data:

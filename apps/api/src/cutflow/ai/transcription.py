@@ -1,0 +1,283 @@
+"""Hybrid ASR transcription: Groq Whisper, local faster-whisper (with VRAM cleanup), or OpenAI."""
+
+from __future__ import annotations
+
+import gc
+import logging
+from dataclasses import dataclass, field
+from pathlib import Path
+
+import httpx
+
+from .. import config
+from ..audio.align import WordTiming
+from ..security import get_secret
+
+log = logging.getLogger(__name__)
+
+
+@dataclass(slots=True)
+class TranscriptSegment:
+    start_ms: int
+    end_ms: int
+    text: str
+    words: list[WordTiming] = field(default_factory=list)
+
+
+@dataclass(slots=True)
+class TranscriptResult:
+    language: str
+    provider: str
+    segments: list[TranscriptSegment]
+    words: list[WordTiming]
+
+
+def _segments_from_words(
+    words: list[WordTiming], max_gap_ms: int = 1200
+) -> list[TranscriptSegment]:
+    if not words:
+        return []
+    segments: list[TranscriptSegment] = []
+    bucket: list[WordTiming] = [words[0]]
+    for w in words[1:]:
+        if w.start_ms - bucket[-1].end_ms > max_gap_ms or len(bucket) >= 18:
+            segments.append(
+                TranscriptSegment(
+                    start_ms=bucket[0].start_ms,
+                    end_ms=bucket[-1].end_ms,
+                    text=" ".join(item.text for item in bucket),
+                    words=bucket,
+                )
+            )
+            bucket = [w]
+        else:
+            bucket.append(w)
+    if bucket:
+        segments.append(
+            TranscriptSegment(
+                start_ms=bucket[0].start_ms,
+                end_ms=bucket[-1].end_ms,
+                text=" ".join(item.text for item in bucket),
+                words=bucket,
+            )
+        )
+    return segments
+
+
+def _transcribe_cloud_whisper(
+    wav_path: Path,
+    *,
+    endpoint: str,
+    api_key: str,
+    model: str,
+    language: str,
+    initial_prompt: str,
+    provider_name: str,
+) -> TranscriptResult:
+    data: dict[str, str | list[str]] = {
+        "model": model,
+        "response_format": "verbose_json",
+        "timestamp_granularities[]": "word",
+    }
+    if language:
+        data["language"] = language
+    if initial_prompt:
+        data["prompt"] = initial_prompt[:400]
+
+    with wav_path.open("rb") as fh, httpx.Client(timeout=180.0) as client:
+        resp = client.post(
+            endpoint,
+            headers={"Authorization": f"Bearer {api_key}"},
+            data=data,
+            files={"file": (wav_path.name, fh, "audio/wav")},
+        )
+        resp.raise_for_status()
+        payload = resp.json()
+
+    words: list[WordTiming] = []
+    for item in payload.get("words") or []:
+        token = str(item.get("word") or "").strip()
+        if not token:
+            continue
+        s_ms = max(0, int(round(float(item.get("start", 0.0)) * 1000.0)))
+        e_ms = max(s_ms + 60, int(round(float(item.get("end", s_ms / 1000.0)) * 1000.0)))
+        words.append(WordTiming(text=token, start_ms=s_ms, end_ms=e_ms))
+
+    segments = _segments_from_words(words)
+    if not segments:
+        for seg in payload.get("segments") or []:
+            text = str(seg.get("text") or "").strip()
+            if not text:
+                continue
+            s_ms = max(0, int(round(float(seg.get("start", 0.0)) * 1000.0)))
+            e_ms = max(s_ms + 100, int(round(float(seg.get("end", s_ms / 1000.0)) * 1000.0)))
+            segments.append(TranscriptSegment(start_ms=s_ms, end_ms=e_ms, text=text, words=[]))
+
+    return TranscriptResult(
+        language=str(payload.get("language") or language or "en"),
+        provider=provider_name,
+        segments=segments,
+        words=words,
+    )
+
+
+def _transcribe_faster_whisper(
+    wav_path: Path,
+    *,
+    model_size: str,
+    language: str,
+    initial_prompt: str,
+    no_speech_threshold: float,
+    log_prob_threshold: float,
+) -> TranscriptResult:
+    from faster_whisper import WhisperModel  # type: ignore[import-not-found]
+
+    device = "cpu"
+    compute_type = "int8"
+    try:
+        import ctranslate2  # type: ignore[import-not-found]
+
+        if ctranslate2.get_cuda_device_count() > 0:
+            device = "cuda"
+            compute_type = "float16"
+    except Exception:
+        pass
+
+    model = WhisperModel(model_size, device=device, compute_type=compute_type)
+    try:
+        seg_iter, info = model.transcribe(
+            str(wav_path),
+            language=language or None,
+            word_timestamps=True,
+            vad_filter=False,
+            no_speech_threshold=no_speech_threshold,
+            log_prob_threshold=log_prob_threshold,
+            initial_prompt=initial_prompt or None,
+        )
+        segments: list[TranscriptSegment] = []
+        all_words: list[WordTiming] = []
+        for seg in seg_iter:
+            seg_words: list[WordTiming] = []
+            for w in getattr(seg, "words", None) or []:
+                token = str(getattr(w, "word", "")).strip()
+                if not token:
+                    continue
+                s_ms = max(0, int(round(float(w.start) * 1000.0)))
+                e_ms = max(s_ms + 60, int(round(float(w.end) * 1000.0)))
+                wt = WordTiming(
+                    text=token,
+                    start_ms=s_ms,
+                    end_ms=e_ms,
+                    confidence=getattr(w, "probability", None),
+                )
+                seg_words.append(wt)
+                all_words.append(wt)
+            text = str(getattr(seg, "text", "")).strip()
+            if text:
+                segments.append(
+                    TranscriptSegment(
+                        start_ms=max(0, int(round(float(seg.start) * 1000.0))),
+                        end_ms=max(100, int(round(float(seg.end) * 1000.0))),
+                        text=text,
+                        words=seg_words,
+                    )
+                )
+        lang = str(getattr(info, "language", "") or language or "en")
+        return TranscriptResult(
+            language=lang,
+            provider=f"faster_whisper:{device}:{model_size}",
+            segments=segments,
+            words=all_words,
+        )
+    finally:
+        # Release 4 GB GTX 1050 Ti VRAM immediately before clip-scoped forced alignment
+        del model
+        gc.collect()
+        try:
+            import torch  # type: ignore[import-not-found]
+
+            if torch.cuda.is_available():
+                torch.cuda.empty_cache()
+        except Exception:
+            pass
+
+
+def transcribe_wav(
+    wav_path: Path,
+    *,
+    initial_prompt: str = "",
+    settings: config.Settings | None = None,
+) -> TranscriptResult:
+    """Transcribe a 16kHz WAV file using Groq -> local faster-whisper -> OpenAI -> graceful noop."""
+    cfg = settings or config.load()
+    align_cfg = cfg.alignment
+
+    # 1. Groq Whisper (ultra-fast cloud ASR when groq key is configured and file <= 24 MB)
+    groq_key = get_secret("groq")
+    if groq_key and wav_path.stat().st_size <= 24 * 1024 * 1024:
+        try:
+            return _transcribe_cloud_whisper(
+                wav_path,
+                endpoint="https://api.groq.com/openai/v1/audio/transcriptions",
+                api_key=groq_key,
+                model="whisper-large-v3-turbo",
+                language=align_cfg.language,
+                initial_prompt=initial_prompt,
+                provider_name="groq:whisper-large-v3-turbo",
+            )
+        except Exception as exc:
+            log.warning("Groq Whisper failed (%s); falling back.", exc)
+
+    # 2. Local faster-whisper
+    try:
+        return _transcribe_faster_whisper(
+            wav_path,
+            model_size=align_cfg.whisper_model,
+            language=align_cfg.language,
+            initial_prompt=initial_prompt,
+            no_speech_threshold=align_cfg.no_speech_threshold,
+            log_prob_threshold=align_cfg.log_prob_threshold,
+        )
+    except ImportError:
+        log.info("faster-whisper is not installed; checking OpenAI fallback.")
+    except Exception as exc:
+        log.warning("Local faster-whisper failed (%s); checking fallback.", exc)
+
+    # 3. OpenAI Whisper fallback
+    openai_key = get_secret("openai")
+    if openai_key and wav_path.stat().st_size <= 24 * 1024 * 1024:
+        try:
+            return _transcribe_cloud_whisper(
+                wav_path,
+                endpoint="https://api.openai.com/v1/audio/transcriptions",
+                api_key=openai_key,
+                model="whisper-1",
+                language=align_cfg.language,
+                initial_prompt=initial_prompt,
+                provider_name="openai:whisper-1",
+            )
+        except Exception as exc:
+            log.warning("OpenAI Whisper failed (%s).", exc)
+
+    return TranscriptResult(
+        language=align_cfg.language or "en",
+        provider="none",
+        segments=[],
+        words=[],
+    )
+
+
+def encode_compact_transcript(segments: list[TranscriptSegment], max_chars: int = 24_000) -> str:
+    """Compact ``[MM:SS.d] text`` encoding saving ~35% tokens versus verbose JSON."""
+    lines: list[str] = []
+    total = 0
+    for seg in segments:
+        s = seg.start_ms / 1000.0
+        mm = int(s // 60)
+        ss = s % 60
+        line = f"[{mm:02d}:{ss:04.1f}] {seg.text.strip()}"
+        if total + len(line) + 1 > max_chars:
+            break
+        lines.append(line)
+        total += len(line) + 1
+    return "\n".join(lines)

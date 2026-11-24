@@ -2,12 +2,20 @@ import {
   Frame,
   Layers,
   Loader2,
+  Pin,
   Plus,
   Rocket,
+  SplitSquareVertical,
   Subtitles,
   Trash2,
 } from "lucide-react";
-import type { OutputSettings, OverlayItem, SubtitleStyle } from "../../edl";
+import {
+  getActiveFramingAt,
+  type NormalizedBox,
+  type OutputSettings,
+  type OverlayItem,
+  type SubtitleStyle,
+} from "../../edl";
 import {
   useTimelineStore,
   type InspectorContext,
@@ -17,6 +25,7 @@ interface ContextInspectorProps {
   canExport: boolean;
   exportingNow: boolean;
   onExportNow: () => Promise<void>;
+  onPinWebcam?: (camBox: NormalizedBox, splitRatio: number) => Promise<void>;
 }
 
 const INSPECTOR_TABS: {
@@ -34,9 +43,11 @@ export function ContextInspector({
   canExport,
   exportingNow,
   onExportNow,
+  onPinWebcam,
 }: ContextInspectorProps) {
   const {
     edl,
+    playheadMs,
     inspectorContext,
     selectedWordId,
     selectedOverlayId,
@@ -45,6 +56,7 @@ export function ContextInspector({
     selectOverlay,
     mutateEdl,
     updateFraming,
+    splitFramingAtPlayhead,
     setWordTiming,
     setWordText,
     removeWord,
@@ -55,7 +67,7 @@ export function ContextInspector({
 
   if (!edl) return null;
 
-  const framing = edl.tracks.video.framing[0];
+  const framing = getActiveFramingAt(edl, playheadMs);
   const selectedWord =
     edl.tracks.subtitles.words.find((w) => w.id === selectedWordId) ?? null;
   const selectedOverlay =
@@ -143,6 +155,36 @@ export function ContextInspector({
                 />
               </div>
             )}
+
+            <div className="flex flex-col gap-1.5 pt-1">
+              <button
+                type="button"
+                onClick={() => {
+                  try {
+                    splitFramingAtPlayhead();
+                  } catch {
+                    // playhead near boundary
+                  }
+                }}
+                className="flex items-center justify-center gap-1.5 rounded border border-[#222836] bg-[#0B0D12] px-2.5 py-1.5 text-[11px] font-medium text-[#CBD5E1] hover:border-[#6366F1] hover:text-white"
+              >
+                <SplitSquareVertical className="h-3.5 w-3.5 text-[#6366F1]" />
+                Split Layout at Playhead ({edl.tracks.video.framing.length} seg)
+              </button>
+
+              {framing.mode === "split" && framing.camBox && onPinWebcam && (
+                <button
+                  type="button"
+                  onClick={() =>
+                    void onPinWebcam(framing.camBox!, framing.splitRatio)
+                  }
+                  className="flex items-center justify-center gap-1.5 rounded border border-[#10B981]/40 bg-[#10B981]/10 px-2.5 py-1.5 text-[11px] font-medium text-[#A7F3D0] hover:bg-[#10B981]/20"
+                >
+                  <Pin className="h-3.5 w-3.5" />
+                  Pin Webcam to Creator Profile
+                </button>
+              )}
+            </div>
 
             <div className="space-y-2 border-t border-[#222836] pt-3">
               <div className="flex items-center justify-between">

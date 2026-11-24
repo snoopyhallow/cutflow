@@ -9,6 +9,7 @@ from .transcription import (
     TranscriptResult,
     TranscriptSegment,
     encode_compact_transcript,
+    transcribe_hot_windows,
     transcribe_wav,
 )
 
@@ -30,5 +31,6 @@ __all__ = [
     "parse_json_payload",
     "run_coeditor",
     "select_hot_windows",
+    "transcribe_hot_windows",
     "transcribe_wav",
 ]

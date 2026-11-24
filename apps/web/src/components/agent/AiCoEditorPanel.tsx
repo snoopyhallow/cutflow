@@ -29,8 +29,8 @@ interface ChatTurn {
 }
 
 const QUICK_PROMPTS = [
+  "Tighten silence",
   "Single word captions",
-  "Cut 2s pause",
   "Remove cold open",
   "Insert 'SIU!' at playhead",
 ];

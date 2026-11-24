@@ -280,6 +280,14 @@ export default function App() {
         } catch (err) {
           setStatusMessage(err instanceof Error ? err.message : String(err));
         }
+      } else if (e.key === "ArrowLeft") {
+        e.preventDefault();
+        store.setIsPlaying(false);
+        store.setPlayheadMs(store.playheadMs - (e.shiftKey ? 500 : 33));
+      } else if (e.key === "ArrowRight") {
+        e.preventDefault();
+        store.setIsPlaying(false);
+        store.setPlayheadMs(store.playheadMs + (e.shiftKey ? 500 : 33));
       } else if (e.key === "Delete" || e.key === "Backspace") {
         if (store.selectedWordId) {
           e.preventDefault();
@@ -412,18 +420,24 @@ export default function App() {
                 onClick={undo}
                 disabled={undoStack.length === 0}
                 title="Undo (Ctrl+Z)"
-                className="rounded p-1.5 text-[#94A3B8] transition-colors hover:bg-[#1A202C] hover:text-white disabled:opacity-35"
+                className="inline-flex items-center gap-1 rounded px-1.5 py-1 text-[11px] text-[#94A3B8] transition-colors hover:bg-[#1A202C] hover:text-white disabled:opacity-35"
               >
                 <Undo2 className="h-3.5 w-3.5" />
+                {undoStack.length > 0 && (
+                  <span className="tabular-tc text-[10px]">{undoStack.length}</span>
+                )}
               </button>
               <button
                 type="button"
                 onClick={redo}
                 disabled={redoStack.length === 0}
                 title="Redo (Ctrl+Shift+Z)"
-                className="rounded p-1.5 text-[#94A3B8] transition-colors hover:bg-[#1A202C] hover:text-white disabled:opacity-35"
+                className="inline-flex items-center gap-1 rounded px-1.5 py-1 text-[11px] text-[#94A3B8] transition-colors hover:bg-[#1A202C] hover:text-white disabled:opacity-35"
               >
                 <Redo2 className="h-3.5 w-3.5" />
+                {redoStack.length > 0 && (
+                  <span className="tabular-tc text-[10px]">{redoStack.length}</span>
+                )}
               </button>
               {dirty && (
                 <span className="ml-1 text-[11px] text-[#F59E0B]">Saving...</span>

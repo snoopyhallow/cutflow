@@ -270,6 +270,148 @@ def delete_word(edl: TimelineProject, word_id: str) -> TimelineProject:
     return next_edl
 
 
+def split_framing_segment(
+    edl: TimelineProject,
+    split_at_ms: int,
+    *,
+    right_mode: str | None = None,
+) -> TimelineProject:
+    """Split the framing segment covering ``split_at_ms`` so layouts can switch mid-clip."""
+    t = int(split_at_ms)
+    next_edl = edl.model_copy(deep=True)
+    out: list[FramingSegment] = []
+    did_split = False
+
+    for seg in next_edl.tracks.video.framing:
+        if (
+            not did_split
+            and seg.timeline_start_ms + MIN_SLICE_MS <= t <= seg.timeline_end_ms - MIN_SLICE_MS
+        ):
+            left = seg.model_copy(update={"timeline_end_ms": t})
+            nxt_mode = (
+                right_mode
+                if right_mode in ("split", "fit", "centre", "crop")
+                else seg.mode
+            )
+            right_cam = (
+                seg.cam_box
+                or (
+                    NormalizedBox(x=0.02, y=0.28, w=0.24, h=0.26)
+                    if nxt_mode == "split"
+                    else None
+                )
+            )
+            right = seg.model_copy(
+                update={
+                    "id": f"{seg.id}_{uuid.uuid4().hex[:4]}",
+                    "timeline_start_ms": t,
+                    "mode": nxt_mode,
+                    "cam_box": right_cam,
+                }
+            )
+            out.extend([left, right])
+            did_split = True
+        else:
+            out.append(seg)
+
+    if not did_split:
+        raise ValueError("Playhead must be at least 100ms inside an existing framing segment.")
+    next_edl.tracks.video.framing = out
+    return next_edl
+
+
+def auto_tighten_silence(
+    edl: TimelineProject,
+    *,
+    rms_100hz: list[float] | None = None,
+    rate_hz: int = 100,
+    min_gap_ms: int = 1100,
+    pad_ms: int = 160,
+    rms_threshold: float = 0.09,
+) -> tuple[TimelineProject, int, int]:
+    """Automatically jump-cut dead-air pauses >= ``min_gap_ms`` inside the main clip body.
+
+    Applies blade cuts from right-to-left so earlier timestamps never drift mid-pass.
+    Returns ``(updated_edl, cuts_applied, total_saved_ms)``.
+    """
+    mapper = TimelineMapper(edl)
+    body_start = mapper.cold_open_ms
+    total_ms = mapper.total_duration_ms
+    if total_ms - body_start < min_gap_ms + 400:
+        return edl.model_copy(deep=True), 0, 0
+
+    # Build occupied speech intervals from subtitle words (if present) or RMS energy bursts
+    occupied: list[tuple[int, int]] = []
+    body_words = [w for w in edl.tracks.subtitles.words if w.end_ms > body_start]
+    if body_words:
+        for w in sorted(body_words, key=lambda x: x.start_ms):
+            s = max(body_start, w.start_ms - pad_ms)
+            e = min(total_ms, w.end_ms + pad_ms)
+            if occupied and s <= occupied[-1][1]:
+                occupied[-1] = (occupied[-1][0], max(occupied[-1][1], e))
+            else:
+                occupied.append((s, e))
+    elif rms_100hz and rate_hz > 0:
+        step_ms = 1000.0 / rate_hz
+        in_speech = False
+        seg_s = body_start
+        for idx, val in enumerate(rms_100hz):
+            t_ms = body_start + int(round(idx * step_ms))
+            if t_ms > total_ms:
+                break
+            if val >= rms_threshold and not in_speech:
+                in_speech = True
+                seg_s = max(body_start, t_ms - pad_ms)
+            elif val < rms_threshold and in_speech:
+                in_speech = False
+                seg_e = min(total_ms, t_ms + pad_ms)
+                if occupied and seg_s <= occupied[-1][1]:
+                    occupied[-1] = (occupied[-1][0], max(occupied[-1][1], seg_e))
+                else:
+                    occupied.append((seg_s, seg_e))
+        if in_speech:
+            occupied.append((seg_s, total_ms))
+
+    if not occupied:
+        return edl.model_copy(deep=True), 0, 0
+
+    # Collect candidate silent gaps inside [body_start, total_ms]
+    gaps: list[tuple[int, int]] = []
+    cursor = body_start
+    for occ_s, occ_e in occupied:
+        if occ_s - cursor >= min_gap_ms:
+            # Verify via RMS envelope (when available) that the gap is genuinely quiet
+            is_quiet = True
+            if rms_100hz and rate_hz > 0:
+                i0 = max(0, int(((cursor - body_start) / 1000.0) * rate_hz))
+                i1 = min(len(rms_100hz), int(((occ_s - body_start) / 1000.0) * rate_hz))
+                if i1 > i0:
+                    avg_rms = sum(rms_100hz[i0:i1]) / (i1 - i0)
+                    is_quiet = avg_rms < rms_threshold * 1.6
+            if is_quiet:
+                gaps.append((cursor, occ_s))
+        cursor = max(cursor, occ_e)
+
+    if total_ms - cursor >= min_gap_ms:
+        gaps.append((cursor, total_ms))
+
+    if not gaps:
+        return edl.model_copy(deep=True), 0, 0
+
+    current = edl.model_copy(deep=True)
+    cuts = 0
+    saved_ms = 0
+    for g_start, g_end in reversed(gaps):
+        rem = TimelineMapper(current).total_duration_ms - body_start
+        if rem - (g_end - g_start) < 1200:
+            continue
+        current = apply_blade_cut(current, g_start, g_end)
+        cuts += 1
+        saved_ms += g_end - g_start
+
+    return current, cuts, saved_ms
+
+
 def apply_edl_patch(
     edl: TimelineProject, ops: list[dict[str, Any]]
 ) -> tuple[TimelineProject, TimelineProject, list[str]]:
@@ -366,7 +508,9 @@ def apply_edl_patch(
                 summaries.append(f"Cold-open → {current.tracks.video.cold_open.duration_ms}ms")
 
         elif kind == "set_framing":
-            seg = current.tracks.video.framing[0]
+            seg_idx = int(op.get("segmentIndex", 0))
+            segs = current.tracks.video.framing
+            seg = segs[max(0, min(len(segs) - 1, seg_idx))]
             if op.get("mode") in ("split", "fit", "centre", "crop"):
                 seg.mode = op["mode"]
             if op.get("splitRatio") is not None:
@@ -374,5 +518,19 @@ def apply_edl_patch(
             if isinstance(op.get("camBox"), dict):
                 seg.cam_box = NormalizedBox.model_validate(op["camBox"]).clamped()
             summaries.append(f"Framing → {seg.mode}")
+
+        elif kind == "split_framing":
+            current = split_framing_segment(
+                current,
+                int(op["splitAtMs"]),
+                right_mode=op.get("mode"),
+            )
+            summaries.append(f"Split framing at {int(op['splitAtMs']) / 1000:.1f}s")
+
+        elif kind == "tighten_silence":
+            min_gap = int(op.get("minGapMs", 1100))
+            current, cuts, saved = auto_tighten_silence(current, min_gap_ms=min_gap)
+            if cuts > 0:
+                summaries.append(f"Tightened {cuts} silent gap(s) (-{saved / 1000:.1f}s)")
 
     return current, before, summaries

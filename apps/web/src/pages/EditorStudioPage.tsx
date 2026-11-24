@@ -284,6 +284,19 @@ export function EditorStudioPage({
                 canExport={Boolean(activeProjectId)}
                 exportingNow={exportingNow}
                 onExportNow={onExportNow}
+                onPinWebcam={async (camBox, splitRatio) => {
+                  try {
+                    const targetId = activeProjectId ?? edl.projectId;
+                    const prof = await transport.pinWebcamToProfile(
+                      targetId,
+                      camBox,
+                      splitRatio,
+                    );
+                    onError(`Pinned webcam box to profile "${prof.name}".`);
+                  } catch (err) {
+                    onError(err instanceof Error ? err.message : String(err));
+                  }
+                }}
               />
             </Panel>
           </PanelGroup>

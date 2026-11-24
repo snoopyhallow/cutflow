@@ -1,4 +1,4 @@
-import type { TimelineProject } from "../edl";
+import type { NormalizedBox, TimelineProject } from "../edl";
 
 export interface HealthResponse {
   status: string;
@@ -233,6 +233,13 @@ export interface StudioTransport {
   health(): Promise<HealthResponse>;
   listProfiles(): Promise<CreatorProfile[]>;
   createProfile(input: ProfileCreateInput): Promise<CreatorProfile>;
+  updateProfile(profileId: string, patch: Record<string, unknown>): Promise<CreatorProfile>;
+  deleteProfile(profileId: string): Promise<void>;
+  pinWebcamToProfile(
+    projectId: string,
+    camBox: NormalizedBox,
+    splitRatio: number,
+  ): Promise<CreatorProfile>;
   listSources(): Promise<SourceSummary[]>;
   uploadVideo(file: File, profileId?: string): Promise<IngestResult>;
   ingestUrl(url: string, profileId?: string): Promise<IngestResult>;

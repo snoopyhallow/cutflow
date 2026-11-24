@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import gc
 import logging
+import tempfile
+import wave
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -12,6 +14,7 @@ import httpx
 from .. import config
 from ..audio.align import WordTiming
 from ..security import get_secret
+from .hype import HotWindow
 
 log = logging.getLogger(__name__)
 
@@ -264,6 +267,109 @@ def transcribe_wav(
         provider="none",
         segments=[],
         words=[],
+    )
+
+
+def _slice_wav_segment(src_wav: Path, dest_wav: Path, start_ms: int, end_ms: int) -> Path:
+    """Slice `[start_ms, end_ms]` out of a 16-bit PCM WAV file purely in Python (0 subprocesses)."""
+    with wave.open(str(src_wav), "rb") as reader:
+        params = reader.getparams()
+        sr = params.framerate
+        f_start = max(0, min(params.nframes, int(round((start_ms / 1000.0) * sr))))
+        f_end = max(f_start, min(params.nframes, int(round((end_ms / 1000.0) * sr))))
+        reader.setpos(f_start)
+        frames = reader.readframes(f_end - f_start)
+
+    with wave.open(str(dest_wav), "wb") as writer:
+        writer.setnchannels(params.nchannels)
+        writer.setsampwidth(params.sampwidth)
+        writer.setframerate(sr)
+        writer.writeframes(frames)
+    return dest_wav
+
+
+def transcribe_hot_windows(
+    wav_path: Path,
+    windows: list[HotWindow] | None = None,
+    *,
+    initial_prompt: str = "",
+    settings: config.Settings | None = None,
+    transcriber_fn=None,
+) -> TranscriptResult:
+    """Transcribe either the full WAV or only selected multi-signal hot windows on long VODs.
+
+    Offsets window-local word and segment timestamps back into absolute source milliseconds,
+    keeping 3-hour VOD scans fast on 4 GB VRAM and within cloud 24 MB upload limits.
+    """
+    runner = transcriber_fn or transcribe_wav
+    if not windows:
+        return runner(wav_path, initial_prompt=initial_prompt, settings=settings)
+
+    # Single full-span window that fits comfortably -> transcribe directly without copying
+    if (
+        len(windows) == 1
+        and windows[0].start_ms == 0
+        and wav_path.stat().st_size <= 23 * 1024 * 1024
+    ):
+        return runner(wav_path, initial_prompt=initial_prompt, settings=settings)
+
+    merged_segments: list[TranscriptSegment] = []
+    merged_words: list[WordTiming] = []
+    detected_lang = "en"
+    provider_used = "none"
+
+    with tempfile.TemporaryDirectory(prefix="cutflow_asr_win_") as tmp:
+        tmp_dir = Path(tmp)
+        for idx, win in enumerate(windows):
+            if win.end_ms - win.start_ms < 500:
+                continue
+            chunk_wav = _slice_wav_segment(
+                wav_path, tmp_dir / f"win_{idx}.wav", win.start_ms, win.end_ms
+            )
+            sub = runner(chunk_wav, initial_prompt=initial_prompt, settings=settings)
+            if sub.language:
+                detected_lang = sub.language
+            if sub.provider != "none":
+                provider_used = sub.provider
+
+            offset = win.start_ms
+            for w in sub.words:
+                merged_words.append(
+                    WordTiming(
+                        text=w.text,
+                        start_ms=w.start_ms + offset,
+                        end_ms=w.end_ms + offset,
+                        speaker=w.speaker,
+                        confidence=w.confidence,
+                    )
+                )
+            for seg in sub.segments:
+                seg_words = [
+                    WordTiming(
+                        text=sw.text,
+                        start_ms=sw.start_ms + offset,
+                        end_ms=sw.end_ms + offset,
+                        speaker=sw.speaker,
+                        confidence=sw.confidence,
+                    )
+                    for sw in seg.words
+                ]
+                merged_segments.append(
+                    TranscriptSegment(
+                        start_ms=seg.start_ms + offset,
+                        end_ms=seg.end_ms + offset,
+                        text=seg.text,
+                        words=seg_words,
+                    )
+                )
+
+    merged_words.sort(key=lambda w: (w.start_ms, w.end_ms))
+    merged_segments.sort(key=lambda s: (s.start_ms, s.end_ms))
+    return TranscriptResult(
+        language=detected_lang,
+        provider=provider_used,
+        segments=merged_segments,
+        words=merged_words,
     )
 
 

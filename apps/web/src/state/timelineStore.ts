@@ -2,10 +2,13 @@ import { produce } from "immer";
 import { create } from "zustand";
 import {
   applyBladeCut,
+  autoTightenSilence,
   cloneEdl,
   deleteWord,
+  getActiveFramingAt,
   getTotalDurationMs,
   insertWord,
+  splitFramingSegment,
   updateWordTiming,
   type FramingSegment,
   type OverlayItem,
@@ -82,6 +85,12 @@ export interface TimelineStoreState {
   updateFraming: (
     patch: Partial<Pick<FramingSegment, "mode" | "splitRatio" | "camBox" | "gameBox">>,
   ) => void;
+  splitFramingAtPlayhead: (rightMode?: FramingSegment["mode"]) => void;
+  tightenSilence: (
+    rms100hz?: number[],
+    rateHz?: number,
+    minGapMs?: number,
+  ) => { cutsApplied: number; savedMs: number };
 
   /** Optimistic AI Co-Editor apply with 1-click Revert support. */
   applyAiPatchResult: (nextEdl: TimelineProject, summary: string[]) => void;
@@ -108,7 +117,7 @@ export const useTimelineStore = create<TimelineStoreState>((set, get) => ({
   selectedWordId: null,
   selectedOverlayId: null,
   inspectorContext: "framing",
-  zoomPxPerSec: 90,
+  zoomPxPerSec: 130,
   dirty: false,
   lastActionLabel: null,
   lastAiPatch: null,
@@ -328,8 +337,12 @@ export const useTimelineStore = create<TimelineStoreState>((set, get) => ({
   },
 
   updateFraming(patch) {
+    const playhead = get().playheadMs;
     get().mutateEdl("Update framing", (draft) => {
-      const seg = draft.tracks.video.framing[0];
+      const active = getActiveFramingAt(draft, playhead);
+      const seg =
+        draft.tracks.video.framing.find((f) => f.id === active.id) ??
+        draft.tracks.video.framing[0];
       if (!seg) return;
       if (patch.mode !== undefined) seg.mode = patch.mode;
       if (patch.splitRatio !== undefined) {
@@ -338,6 +351,33 @@ export const useTimelineStore = create<TimelineStoreState>((set, get) => ({
       if (patch.camBox !== undefined) seg.camBox = patch.camBox;
       if (patch.gameBox !== undefined) seg.gameBox = patch.gameBox;
     });
+  },
+
+  splitFramingAtPlayhead(rightMode) {
+    const current = get().edl;
+    if (!current) return;
+    const nextEdl = splitFramingSegment(current, get().playheadMs, rightMode);
+    get().commitEdl(
+      `Split layout at ${(get().playheadMs / 1000).toFixed(1)}s`,
+      nextEdl,
+    );
+  },
+
+  tightenSilence(rms100hz, rateHz = 100, minGapMs = 1100) {
+    const current = get().edl;
+    if (!current) return { cutsApplied: 0, savedMs: 0 };
+    const res = autoTightenSilence(current, {
+      rms100hz,
+      rateHz,
+      minGapMs,
+    });
+    if (res.cutsApplied > 0) {
+      get().commitEdl(
+        `Tighten ${res.cutsApplied} pause(s) (-${(res.savedMs / 1000).toFixed(1)}s)`,
+        res.edl,
+      );
+    }
+    return { cutsApplied: res.cutsApplied, savedMs: res.savedMs };
   },
 
   applyAiPatchResult(nextEdl, summary) {

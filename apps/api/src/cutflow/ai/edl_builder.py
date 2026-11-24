@@ -61,13 +61,22 @@ def build_clip_edl(
 
     total_duration_ms = cold_open_ms + body_dur
 
-    # Framing mode: split when cam_box present (or explicitly split), otherwise fit/centre/crop
-    if cam_box is not None:
+    # Framing mode: honor pinned/detected cam_box for split, or map profile layout cleanly
+    effective_cam = cam_box or profile.cam_box
+    if profile.layout_mode in ("split", "auto_split") and effective_cam is not None:
         framing_mode = "split"
+    elif profile.layout_mode == "split" and effective_cam is None:
+        effective_cam = NormalizedBox(x=0.02, y=0.28, w=0.24, h=0.26)
+        framing_mode = "split"
+    elif profile.layout_mode == "auto_reframe":
+        framing_mode = "centre"
+        effective_cam = None
     elif profile.layout_mode in ("fit", "centre", "crop"):
         framing_mode = profile.layout_mode
+        effective_cam = None
     else:
         framing_mode = "fit"
+        effective_cam = None
 
     framing = [
         FramingSegment(
@@ -76,7 +85,7 @@ def build_clip_edl(
             timeline_end_ms=total_duration_ms,
             mode=framing_mode,  # type: ignore[arg-type]
             split_ratio=max(0.20, min(0.65, float(profile.split_ratio))),
-            cam_box=cam_box,
+            cam_box=effective_cam,
             game_box=None,
         )
     ]

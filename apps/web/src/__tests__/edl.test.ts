@@ -2,12 +2,15 @@ import { describe, expect, it } from "vitest";
 import sampleEdlFixture from "@edl-schema/fixtures/sample_streamer_clip.edl.json";
 import {
   applyBladeCut,
+  autoTightenSilence,
   deleteWord,
   formatTimecodeMs,
+  getActiveFramingAt,
   getTotalDurationMs,
   insertWord,
   snapToNearestOnsetMs,
   sourceToTimeline,
+  splitFramingSegment,
   TimelineProjectSchema,
   timelineToSource,
   updateWordTiming,
@@ -227,5 +230,16 @@ describe("Zustand Command-Pattern Timeline Store & DemoTransport", () => {
     expect(useTimelineStore.getState().edl!.tracks.overlays.some((o) => o.id === ctaId)).toBe(
       true,
     );
+
+    // Multi-segment framing keyframe split + Auto Tighten Silence
+    const splitEdl = splitFramingSegment(edl, 8000, "fit");
+    expect(splitEdl.tracks.video.framing).toHaveLength(2);
+    expect(getActiveFramingAt(splitEdl, 3000).mode).toBe("split");
+    expect(getActiveFramingAt(splitEdl, 12_000).mode).toBe("fit");
+
+    const tightened = autoTightenSilence(edl, { minGapMs: 1100 });
+    expect(tightened.cutsApplied).toBeGreaterThanOrEqual(2);
+    expect(tightened.savedMs).toBeGreaterThan(14_000);
+    expect(getTotalDurationMs(tightened.edl)).toBeLessThan(7500);
   });
 });

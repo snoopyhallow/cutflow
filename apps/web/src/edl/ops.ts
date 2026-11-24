@@ -386,3 +386,161 @@ export function snapToNearestOnsetMs(
   return Math.round((bestIdx / rateHz) * 1000);
 }
 
+export function getActiveFramingAt(
+  edl: TimelineProject,
+  timelineMs: number,
+): FramingSegment {
+  const segs = edl.tracks.video.framing;
+  const t = Math.max(0, Math.round(timelineMs));
+  return (
+    segs.find((s) => t >= s.timelineStartMs && t < s.timelineEndMs) ??
+    segs[segs.length - 1] ??
+    segs[0]
+  );
+}
+
+export function splitFramingSegment(
+  edl: TimelineProject,
+  splitAtMs: number,
+  rightMode?: FramingSegment["mode"],
+): TimelineProject {
+  const t = Math.round(splitAtMs);
+  const next = cloneEdl(edl);
+  const out: FramingSegment[] = [];
+  let didSplit = false;
+
+  for (const seg of next.tracks.video.framing) {
+    if (
+      !didSplit &&
+      t >= seg.timelineStartMs + MIN_SLICE_MS &&
+      t <= seg.timelineEndMs - MIN_SLICE_MS
+    ) {
+      const nextMode = rightMode ?? seg.mode;
+      out.push({ ...seg, timelineEndMs: t });
+      out.push({
+        ...seg,
+        id: nextId(seg.id),
+        timelineStartMs: t,
+        mode: nextMode,
+        camBox:
+          seg.camBox ??
+          (nextMode === "split" ? { x: 0.02, y: 0.28, w: 0.24, h: 0.26 } : null),
+      });
+      didSplit = true;
+    } else {
+      out.push(seg);
+    }
+  }
+
+  if (!didSplit) {
+    throw new Error("Move playhead at least 100ms inside a framing segment to split.");
+  }
+  next.tracks.video.framing = out;
+  return next;
+}
+
+/**
+ * Automatically jump-cut silent dead-air pauses >= `minGapMs` inside the main clip body
+ * (preserving Cold-Open and leaving `padMs` natural breath padding around speech).
+ */
+export function autoTightenSilence(
+  edl: TimelineProject,
+  opts?: {
+    rms100hz?: number[];
+    rateHz?: number;
+    minGapMs?: number;
+    padMs?: number;
+    rmsThreshold?: number;
+  },
+): { edl: TimelineProject; cutsApplied: number; savedMs: number } {
+  const rms = opts?.rms100hz;
+  const rateHz = opts?.rateHz ?? 100;
+  const minGapMs = opts?.minGapMs ?? 1100;
+  const padMs = opts?.padMs ?? 160;
+  const rmsThreshold = opts?.rmsThreshold ?? 0.09;
+
+  const bodyStart = getColdOpenDurationMs(edl);
+  const totalMs = getTotalDurationMs(edl);
+  if (totalMs - bodyStart < minGapMs + 400) {
+    return { edl: cloneEdl(edl), cutsApplied: 0, savedMs: 0 };
+  }
+
+  const occupied: [number, number][] = [];
+  const bodyWords = edl.tracks.subtitles.words
+    .filter((w) => w.endMs > bodyStart)
+    .sort((a, b) => a.startMs - b.startMs);
+
+  if (bodyWords.length > 0) {
+    for (const w of bodyWords) {
+      const s = Math.max(bodyStart, w.startMs - padMs);
+      const e = Math.min(totalMs, w.endMs + padMs);
+      if (occupied.length > 0 && s <= occupied[occupied.length - 1][1]) {
+        occupied[occupied.length - 1][1] = Math.max(occupied[occupied.length - 1][1], e);
+      } else {
+        occupied.push([s, e]);
+      }
+    }
+  } else if (rms && rms.length > 0 && rateHz > 0) {
+    const stepMs = 1000 / rateHz;
+    let inSpeech = false;
+    let segS = bodyStart;
+    for (let i = 0; i < rms.length; i += 1) {
+      const tMs = bodyStart + Math.round(i * stepMs);
+      if (tMs > totalMs) break;
+      if (rms[i] >= rmsThreshold && !inSpeech) {
+        inSpeech = true;
+        segS = Math.max(bodyStart, tMs - padMs);
+      } else if (rms[i] < rmsThreshold && inSpeech) {
+        inSpeech = false;
+        const segE = Math.min(totalMs, tMs + padMs);
+        if (occupied.length > 0 && segS <= occupied[occupied.length - 1][1]) {
+          occupied[occupied.length - 1][1] = Math.max(occupied[occupied.length - 1][1], segE);
+        } else {
+          occupied.push([segS, segE]);
+        }
+      }
+    }
+    if (inSpeech) occupied.push([segS, totalMs]);
+  }
+
+  if (occupied.length === 0) {
+    return { edl: cloneEdl(edl), cutsApplied: 0, savedMs: 0 };
+  }
+
+  const gaps: [number, number][] = [];
+  let cursor = bodyStart;
+  for (const [occS, occE] of occupied) {
+    if (occS - cursor >= minGapMs) {
+      let isQuiet = true;
+      if (rms && rms.length > 0 && rateHz > 0) {
+        const i0 = Math.max(0, Math.floor(((cursor - bodyStart) / 1000) * rateHz));
+        const i1 = Math.min(rms.length, Math.floor(((occS - bodyStart) / 1000) * rateHz));
+        if (i1 > i0) {
+          let sum = 0;
+          for (let k = i0; k < i1; k += 1) sum += rms[k];
+          isQuiet = sum / (i1 - i0) < rmsThreshold * 1.6;
+        }
+      }
+      if (isQuiet) gaps.push([cursor, occS]);
+    }
+    cursor = Math.max(cursor, occE);
+  }
+  if (totalMs - cursor >= minGapMs) {
+    gaps.push([cursor, totalMs]);
+  }
+
+  let current = cloneEdl(edl);
+  let cutsApplied = 0;
+  let savedMs = 0;
+  for (let i = gaps.length - 1; i >= 0; i -= 1) {
+    const [gStart, gEnd] = gaps[i];
+    const rem = getTotalDurationMs(current) - bodyStart;
+    if (rem - (gEnd - gStart) < 1200) continue;
+    current = applyBladeCut(current, gStart, gEnd);
+    cutsApplied += 1;
+    savedMs += gEnd - gStart;
+  }
+
+  return { edl: current, cutsApplied, savedMs };
+}
+

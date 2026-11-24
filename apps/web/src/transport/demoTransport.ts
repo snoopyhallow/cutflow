@@ -1,11 +1,13 @@
 import sampleEdlFixture from "@edl-schema/fixtures/sample_streamer_clip.edl.json";
 import {
   applyBladeCut,
+  autoTightenSilence,
   cloneEdl,
   getColdOpenDurationMs,
   getTotalDurationMs,
   insertWord,
   TimelineProjectSchema,
+  type NormalizedBox,
   type TimelineProject,
 } from "../edl";
 import type {
@@ -158,6 +160,33 @@ export class DemoTransport implements StudioTransport {
     };
     this.profiles.push(created);
     return structuredClone(created);
+  }
+
+  async updateProfile(
+    profileId: string,
+    patch: Record<string, unknown>,
+  ): Promise<CreatorProfile> {
+    const idx = this.profiles.findIndex((p) => p.id === profileId);
+    if (idx === -1) throw new Error("Profile not found.");
+    this.profiles[idx] = { ...this.profiles[idx], ...patch, id: profileId };
+    return structuredClone(this.profiles[idx]);
+  }
+
+  async deleteProfile(profileId: string): Promise<void> {
+    if (this.profiles.length <= 1) {
+      throw new Error("Keep at least one Creator Profile.");
+    }
+    const idx = this.profiles.findIndex((p) => p.id === profileId);
+    if (idx !== -1) this.profiles.splice(idx, 1);
+  }
+
+  async pinWebcamToProfile(
+    _projectId: string,
+    _camBox: NormalizedBox,
+    splitRatio: number,
+  ): Promise<CreatorProfile> {
+    this.profiles[0].split_ratio = splitRatio;
+    return structuredClone(this.profiles[0]);
   }
 
   async listSources(): Promise<SourceSummary[]> {
@@ -413,6 +442,19 @@ export class DemoTransport implements StudioTransport {
       next = applyBladeCut(next, sMs, eMs);
       applied.push(`Cut ${(sMs / 1000).toFixed(1)}–${(eMs / 1000).toFixed(1)}s`);
       ops.push({ op: "blade_cut", cutStartMs: sMs, cutEndMs: eMs });
+    } else if (
+      lower.includes("tighten silence") ||
+      lower.includes("dead air") ||
+      lower.includes("jump cut")
+    ) {
+      const tightened = autoTightenSilence(next, { minGapMs: 1100 });
+      if (tightened.cutsApplied > 0) {
+        next = tightened.edl;
+        applied.push(
+          `Tightened ${tightened.cutsApplied} silent gap(s) (-${(tightened.savedMs / 1000).toFixed(1)}s)`,
+        );
+        ops.push({ op: "tighten_silence", minGapMs: 1100 });
+      }
     } else if (lower.includes("cut pause") || lower.includes("cut 2s")) {
       const sMs = Math.max(getColdOpenDurationMs(next), req.playheadMs ?? 0);
       const eMs = Math.min(getTotalDurationMs(next), sMs + 2000);

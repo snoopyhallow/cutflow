@@ -17,7 +17,14 @@ from .. import __version__, cli, config, paths
 from ..ai import generate_post_copy, run_coeditor
 from ..db import ClipProjectRow, ExportRow, FeedItemRow, JobRow, SourceRow, get_session
 from ..db.models import new_id, utcnow_iso
-from ..edl import TimelineMapper, TimelineProject, apply_blade_cut, apply_edl_patch
+from ..edl import (
+    NormalizedBox,
+    TimelineMapper,
+    TimelineProject,
+    apply_blade_cut,
+    apply_edl_patch,
+    auto_tighten_silence,
+)
 from ..ingest import VIDEO_EXTENSIONS, InboxWatcher, poll_all_feeds
 from ..render import RenderError
 from ..security import (
@@ -118,6 +125,19 @@ class ProjectStatusIn(BaseModel):
 
 class PostCopyIn(BaseModel):
     platform: str = Field(default="all", pattern=r"^(tiktok|shorts|reels|all)$")
+
+
+class TightenSilenceIn(BaseModel):
+    min_gap_ms: int = Field(default=1100, alias="minGapMs", ge=400, le=5000)
+
+    model_config = {"populate_by_name": True}
+
+
+class PinWebcamIn(BaseModel):
+    cam_box: NormalizedBox = Field(alias="camBox")
+    split_ratio: float = Field(default=0.35, alias="splitRatio", ge=0.20, le=0.65)
+
+    model_config = {"populate_by_name": True}
 
 
 class ExportRequestIn(BaseModel):
@@ -754,6 +774,66 @@ async def project_post_copy(
         profile=profile,
         platform=req.platform,
     )
+
+
+@router.post("/projects/{project_id}/tighten-silence")
+def tighten_project_silence(
+    project_id: str, payload: TightenSilenceIn | None = None
+) -> dict[str, Any]:
+    req = payload or TightenSilenceIn()
+    with get_session() as session:
+        row = session.get(ClipProjectRow, project_id)
+        if row is None:
+            raise HTTPException(status_code=404, detail="Clip project not found.")
+        current = TimelineProject.model_validate(row.edl_json)
+        rms_list: list[float] | None = None
+        rate_hz = 100
+        if row.peaks_path:
+            try:
+                safe_peaks = safe_resolve(Path(row.peaks_path), paths.work_dir())
+                if safe_peaks.is_file():
+                    peaks_data = json.loads(safe_peaks.read_text(encoding="utf-8"))
+                    rms_list = peaks_data.get("rms") or peaks_data.get("peaks")
+                    rate_hz = int(peaks_data.get("rateHz") or 100)
+            except (OSError, ValueError, PathSandboxError):
+                pass
+
+        updated, cuts, saved_ms = auto_tighten_silence(
+            current,
+            rms_100hz=rms_list,
+            rate_hz=rate_hz,
+            min_gap_ms=req.min_gap_ms,
+        )
+        if cuts > 0:
+            row.edl_json = updated.to_canonical_dict()
+            row.updated_at = utcnow_iso()
+
+    return {
+        "edl": updated.to_canonical_dict(),
+        "previousEdl": current.to_canonical_dict(),
+        "cutsApplied": cuts,
+        "savedMs": saved_ms,
+        "totalDurationMs": TimelineMapper(updated).total_duration_ms,
+    }
+
+
+@router.post("/projects/{project_id}/pin-webcam")
+def pin_webcam_to_profile(project_id: str, payload: PinWebcamIn) -> ProfileOut:
+    with get_session() as session:
+        row = session.get(ClipProjectRow, project_id)
+        if row is None:
+            raise HTTPException(status_code=404, detail="Clip project not found.")
+        edl = TimelineProject.model_validate(row.edl_json)
+
+    target_pid = edl.profile_id or profile_store.list_profiles()[0].id
+    prof = profile_store.get_profile(target_pid)
+    if prof is None:
+        raise HTTPException(status_code=404, detail=f"Profile {target_pid!r} not found.")
+
+    prof.cam_box = payload.cam_box.clamped()
+    prof.split_ratio = payload.split_ratio
+    saved = profile_store.upsert_profile(prof)
+    return ProfileOut.of(saved)
 
 
 # -- Exports & Delivery ----------------------------------------------------

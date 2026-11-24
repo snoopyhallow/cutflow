@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import os
 import platform
 import shutil
 import subprocess
@@ -61,7 +62,9 @@ def serve(
     reload: bool = typer.Option(False, help="Enable hot reload for development."),
 ) -> None:
     """Start the local CutFlow studio server."""
-    if host not in ("127.0.0.1", "localhost", "::1"):
+    allow_container = os.environ.get("CUTFLOW_ALLOW_CONTAINER_BIND") == "1"
+    allowed = ("127.0.0.1", "localhost", "::1") + (("0.0.0.0",) if allow_container else ())
+    if host not in allowed:
         typer.secho(
             f"Refusing non-local bind host {host!r}; CutFlow requires local-first binding.",
             fg=typer.colors.RED,

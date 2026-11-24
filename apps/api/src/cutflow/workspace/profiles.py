@@ -27,7 +27,9 @@ class CreatorProfile(BaseModel):
     min_duration_s: float = Field(default=15.0, gt=0)
     max_duration_s: float = Field(default=50.0, gt=0)
     max_clips: int = Field(default=8, ge=1, le=50)
-    layout_mode: Literal["auto_split", "fit", "auto_reframe"] = "auto_split"
+    layout_mode: Literal[
+        "auto_split", "split", "fit", "centre", "crop", "auto_reframe"
+    ] = "auto_split"
     split_ratio: float = Field(default=0.35, ge=0.20, le=0.65)
     cam_box: NormalizedBox | None = None
     title_card_style: Literal["seam_card_white", "hook_banner_dark", "off"] = "seam_card_white"

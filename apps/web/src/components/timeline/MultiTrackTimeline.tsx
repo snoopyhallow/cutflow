@@ -1,8 +1,9 @@
-import { useMemo, useRef, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import {
   Magnet,
   Plus,
   Scissors,
+  Wand2,
   ZoomIn,
   ZoomOut,
 } from "lucide-react";
@@ -27,6 +28,7 @@ export function MultiTrackTimeline({ peaks, onError }: MultiTrackTimelineProps) 
   const {
     edl,
     playheadMs,
+    isPlaying,
     zoomPxPerSec,
     snapToWaveform,
     inPointMs,
@@ -47,6 +49,7 @@ export function MultiTrackTimeline({ peaks, onError }: MultiTrackTimelineProps) 
     addWord,
     updateOverlay,
     bladeCut,
+    tightenSilence,
   } = useTimelineStore();
 
   const tracksScrollRef = useRef<HTMLDivElement | null>(null);
@@ -82,6 +85,17 @@ export function MultiTrackTimeline({ peaks, onError }: MultiTrackTimelineProps) 
     }
     return out;
   }, [totalDurationMs, zoomPxPerSec]);
+
+  // Smoothly auto-scroll timeline viewport to keep playhead visible during playback
+  useEffect(() => {
+    const el = tracksScrollRef.current;
+    if (!el || !isPlaying || totalDurationMs <= 0) return;
+    const playheadX = (playheadMs / totalDurationMs) * timelineWidthPx;
+    const viewRight = el.scrollLeft + el.clientWidth;
+    if (playheadX > viewRight - 80 || playheadX < el.scrollLeft) {
+      el.scrollLeft = Math.max(0, playheadX - 120);
+    }
+  }, [playheadMs, isPlaying, totalDurationMs, timelineWidthPx]);
 
   if (!edl) return null;
 
@@ -270,6 +284,21 @@ export function MultiTrackTimeline({ peaks, onError }: MultiTrackTimelineProps) 
 
           <button
             type="button"
+            onClick={() => {
+              const res = tightenSilence(peaks?.rms, peaks?.rateHz ?? 100, 1100);
+              if (res.cutsApplied === 0) {
+                onError?.("No silent dead-air gaps (>= 1.1s) found to tighten.");
+              }
+            }}
+            title="Auto jump-cut dead-air pauses >= 1.1s"
+            className="inline-flex items-center gap-1 rounded border border-[#10B981]/45 bg-[#10B981]/12 px-2.5 py-0.5 text-[11px] font-medium text-[#A7F3D0] hover:bg-[#10B981]/25"
+          >
+            <Wand2 className="h-3 w-3" />
+            Tighten Silence
+          </button>
+
+          <button
+            type="button"
             onClick={() => addWord("NEW", playheadMs, 650)}
             title="Insert caption word at playhead"
             className="inline-flex items-center gap-1 rounded border border-[#F59E0B]/40 bg-[#F59E0B]/10 px-2 py-0.5 text-[11px] font-medium text-[#FDE68A] hover:bg-[#F59E0B]/20"
@@ -428,7 +457,7 @@ export function MultiTrackTimeline({ peaks, onError }: MultiTrackTimelineProps) 
                 const endMs = wordDrag?.id === w.id ? wordDrag.endMs : w.endMs;
                 const isSelected = selectedWordId === w.id;
                 const isEditing = editingWordId === w.id;
-                const widthPx = Math.max(26, msToPx(endMs - startMs));
+                const widthPx = Math.max(22, msToPx(endMs - startMs));
 
                 return (
                   <div
@@ -447,7 +476,7 @@ export function MultiTrackTimeline({ peaks, onError }: MultiTrackTimelineProps) 
                       setEditingWordDraft(w.text);
                     }}
                     title={`${w.text} (${formatTimecodeMs(startMs)}–${formatTimecodeMs(endMs)}) · Drag edges to roll-trim, double-click to rename`}
-                    className={`group absolute inset-y-1 flex cursor-grab items-center justify-center rounded border px-1.5 text-[10px] font-semibold active:cursor-grabbing ${
+                    className={`group absolute inset-y-1 flex cursor-grab items-center justify-center rounded border px-1 text-[10px] font-semibold active:cursor-grabbing ${
                       isSelected
                         ? "z-20 border-white bg-[#F59E0B] text-black shadow-md"
                         : "border-[#F59E0B]/60 bg-[#F59E0B]/25 text-[#FEF3C7] hover:bg-[#F59E0B]/35"
@@ -519,6 +548,19 @@ export function MultiTrackTimeline({ peaks, onError }: MultiTrackTimelineProps) 
                   </div>
                 );
               })}
+
+              {edl.tracks.video.framing.length > 1 &&
+                edl.tracks.video.framing.map((f) => (
+                  <div
+                    key={f.id}
+                    onClick={() => setPlayheadMs(f.timelineStartMs)}
+                    title={`Framing keyframe: ${f.mode}`}
+                    className="absolute top-0.5 z-10 cursor-pointer rounded bg-[#6366F1]/80 px-1 text-[8px] font-bold uppercase text-white"
+                    style={{ left: `${msToPx(f.timelineStartMs) + 2}px` }}
+                  >
+                    {f.mode}
+                  </div>
+                ))}
             </div>
 
             {/* Track 4: High-DPI 100Hz Audio Waveform (#10B981 Emerald) */}

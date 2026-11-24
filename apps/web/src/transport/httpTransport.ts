@@ -1,4 +1,8 @@
-import { TimelineProjectSchema, type TimelineProject } from "../edl";
+import {
+  TimelineProjectSchema,
+  type NormalizedBox,
+  type TimelineProject,
+} from "../edl";
 import type {
   ClipProjectSummary,
   ClipStatus,
@@ -66,6 +70,40 @@ export class HttpTransport implements StudioTransport {
       method: "POST",
       body: JSON.stringify(input),
     });
+  }
+
+  updateProfile(
+    profileId: string,
+    patch: Record<string, unknown>,
+  ): Promise<CreatorProfile> {
+    return requestJson<CreatorProfile>(
+      `${this.baseUrl}/profiles/${encodeURIComponent(profileId)}`,
+      {
+        method: "PUT",
+        body: JSON.stringify(patch),
+      },
+    );
+  }
+
+  async deleteProfile(profileId: string): Promise<void> {
+    await requestJson<void>(
+      `${this.baseUrl}/profiles/${encodeURIComponent(profileId)}`,
+      { method: "DELETE" },
+    );
+  }
+
+  pinWebcamToProfile(
+    projectId: string,
+    camBox: NormalizedBox,
+    splitRatio: number,
+  ): Promise<CreatorProfile> {
+    return requestJson<CreatorProfile>(
+      `${this.baseUrl}/projects/${encodeURIComponent(projectId)}/pin-webcam`,
+      {
+        method: "POST",
+        body: JSON.stringify({ camBox, splitRatio }),
+      },
+    );
   }
 
   listSources(): Promise<SourceSummary[]> {

@@ -90,6 +90,9 @@ def _style_for_preset(
 
     primary = hex_to_ass_bgr(style.primary_color, 0)
     secondary = hex_to_ass_bgr(style.accent_color, 0)
+    if style.preset == "karaoke_fill":
+        # In libass \kf karaoke, PrimaryColour is swept fill and SecondaryColour is pre-sweep.
+        primary, secondary = secondary, primary
     outline_col = hex_to_ass_bgr(style.outline_color, 0)
     back_col = "&H80000000"
 
@@ -166,9 +169,33 @@ def generate_ass_subtitles(
     if reveal_mode == "single_word":
         for w in visible_words:
             s = format_ass_time(w.start_ms)
-            e = format_ass_time(max(w.start_ms + 60, w.end_ms))
-            body = f"{pop_tag}{{\\1c{accent_bgr}}}{fmt_word(w.text)}"
+            dur_ms = max(60, w.end_ms - w.start_ms)
+            e = format_ass_time(w.start_ms + dur_ms)
+            if preset == "karaoke_fill":
+                cs = max(6, round(dur_ms / 10))
+                body = f"{{\\kf{cs}}}{fmt_word(w.text)}"
+            else:
+                body = f"{pop_tag}{{\\1c{accent_bgr}}}{fmt_word(w.text)}"
             events.append(f"Dialogue: 0,{s},{e},Default,,0,0,0,,{body}")
+    elif preset == "karaoke_fill":
+        # True libass \kf smooth sweep across each phrase group!
+        groups = _group_words(visible_words, max_words=3)
+        for group in groups:
+            ev_start = group[0].start_ms
+            ev_end = max(ev_start + 80, group[-1].end_ms)
+            chunks: list[str] = []
+            cursor_ms = ev_start
+            for w in group:
+                gap_ms = max(0, w.start_ms - cursor_ms)
+                if gap_ms >= 20:
+                    chunks.append(f"{{\\k{max(1, round(gap_ms / 10))}}}")
+                dur_ms = max(60, w.end_ms - max(w.start_ms, cursor_ms))
+                chunks.append(f"{{\\kf{max(6, round(dur_ms / 10))}}}{fmt_word(w.text)}")
+                cursor_ms = max(cursor_ms, w.end_ms)
+            events.append(
+                f"Dialogue: 0,{format_ass_time(ev_start)},{format_ass_time(ev_end)},"
+                f"Default,,0,0,0,,{' '.join(chunks)}"
+            )
     else:
         groups = _group_words(visible_words, max_words=3)
         for group in groups:

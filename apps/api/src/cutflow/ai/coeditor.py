@@ -43,13 +43,24 @@ def _deterministic_ops_from_instruction(
     lower = text.lower()
     ops: list[dict[str, Any]] = []
 
-    # 1. Mid-clip blade cut range ("cut 4s to 7.5s" or "remove 2-5s")
+    # 1. Mid-clip blade cut range ("cut 4s to 7.5s") or auto jump-cut silence
     cut_match = _CUT_RANGE_RE.search(text)
     if cut_match:
         s_ms = int(round(float(cut_match.group(1)) * 1000))
         e_ms = int(round(float(cut_match.group(2)) * 1000))
         if e_ms > s_ms:
             ops.append({"op": "blade_cut", "cutStartMs": s_ms, "cutEndMs": e_ms})
+    elif any(
+        k in lower
+        for k in (
+            "tighten silence",
+            "remove dead air",
+            "cut silence",
+            "remove awkward pause",
+            "jump cut",
+        )
+    ):
+        ops.append({"op": "tighten_silence", "minGapMs": 1100})
     elif any(k in lower for k in ("cut pause", "blade cut", "cut 2s", "cut 1.5s")):
         mapper = TimelineMapper(edl)
         s_ms = max(mapper.cold_open_ms, int(playhead_ms))

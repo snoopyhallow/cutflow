@@ -10,7 +10,7 @@ from pathlib import Path
 
 from ..audio.media import MediaError, probe_media
 from ..edl.ops import TimelineMapper
-from ..edl.schema import TimelineProject
+from ..edl.schema import FramingSegment, TimelineProject
 from .overlays import RenderedOverlay, render_overlay_png
 from .subtitles import write_ass_file
 
@@ -151,6 +151,58 @@ def _encoder_args(
     )
 
 
+def _build_framing_segment_filters(
+    in_label: str,
+    out_label: str,
+    framing: FramingSegment,
+    *,
+    out_w: int,
+    out_h: int,
+    tag: str,
+) -> list[str]:
+    """Build FFmpeg filtergraph nodes transforming ``[in_label]`` into ``[out_label]``."""
+    parts: list[str] = []
+    if framing.mode == "split" and framing.cam_box is not None:
+        cam = framing.cam_box.clamped()
+        top_h = max(2, (int(round(out_h * framing.split_ratio)) // 2) * 2)
+        bot_h = max(2, out_h - top_h)
+        parts.append(f"[{in_label}]split=2[vt_in_{tag}][vb_in_{tag}]")
+        parts.append(
+            f"[vt_in_{tag}]crop=iw*{cam.w:.4f}:ih*{cam.h:.4f}:iw*{cam.x:.4f}:ih*{cam.y:.4f},"
+            f"scale={out_w}:{top_h}:force_original_aspect_ratio=increase,"
+            f"crop={out_w}:{top_h}[vt_{tag}]"
+        )
+        if framing.game_box is not None:
+            gb = framing.game_box.clamped()
+            bot_crop = f"crop=iw*{gb.w:.4f}:ih*{gb.h:.4f}:iw*{gb.x:.4f}:ih*{gb.y:.4f},"
+        else:
+            bot_crop = ""
+        parts.append(
+            f"[vb_in_{tag}]{bot_crop}"
+            f"scale={out_w}:{bot_h}:force_original_aspect_ratio=increase,"
+            f"crop={out_w}:{bot_h}[vb_{tag}]"
+        )
+        parts.append(f"[vt_{tag}][vb_{tag}]vstack=inputs=2,format=yuv420p,setsar=1[{out_label}]")
+    elif framing.mode == "fit":
+        parts.append(f"[{in_label}]split=2[vbg_in_{tag}][vfg_in_{tag}]")
+        parts.append(
+            f"[vbg_in_{tag}]scale={out_w}:{out_h}:force_original_aspect_ratio=increase,"
+            f"crop={out_w}:{out_h},gblur=sigma=24[vbg_{tag}]"
+        )
+        parts.append(
+            f"[vfg_in_{tag}]scale={out_w}:{out_h}:force_original_aspect_ratio=decrease[vfg_{tag}]"
+        )
+        parts.append(
+            f"[vbg_{tag}][vfg_{tag}]overlay=(W-w)/2:(H-h)/2,format=yuv420p,setsar=1[{out_label}]"
+        )
+    else:
+        parts.append(
+            f"[{in_label}]scale={out_w}:{out_h}:force_original_aspect_ratio=increase,"
+            f"crop={out_w}:{out_h},format=yuv420p,setsar=1[{out_label}]"
+        )
+    return parts
+
+
 def compile_edl_to_ffmpeg(
     edl: TimelineProject,
     *,
@@ -218,49 +270,36 @@ def compile_edl_to_ffmpeg(
         cur_v = "vcat"
         cur_a = "acat"
 
-    # 2. Framing transformation (split / fit / centre / crop)
-    framing = edl.tracks.video.framing[0]
-    split_ratio = framing.split_ratio
-    if framing.mode == "split" and framing.cam_box is not None:
-        cam = framing.cam_box.clamped()
-        top_h = max(2, (int(round(out_h * split_ratio)) // 2) * 2)
-        bot_h = max(2, out_h - top_h)
-
-        filter_parts.append(f"[{cur_v}]split=2[vtop_in][vbot_in]")
-        filter_parts.append(
-            f"[vtop_in]crop=iw*{cam.w:.4f}:ih*{cam.h:.4f}:iw*{cam.x:.4f}:ih*{cam.y:.4f},"
-            f"scale={out_w}:{top_h}:force_original_aspect_ratio=increase,"
-            f"crop={out_w}:{top_h}[vtop]"
+    # 2. Framing transformation (supports both single-segment and multi-segment keyframes!)
+    framing_segments = edl.tracks.video.framing
+    split_ratio = framing_segments[0].split_ratio
+    if len(framing_segments) == 1:
+        filter_parts.extend(
+            _build_framing_segment_filters(
+                cur_v, "vframed", framing_segments[0], out_w=out_w, out_h=out_h, tag="f0"
+            )
         )
-        if framing.game_box is not None:
-            gb = framing.game_box.clamped()
-            bot_crop = f"crop=iw*{gb.w:.4f}:ih*{gb.h:.4f}:iw*{gb.x:.4f}:ih*{gb.y:.4f},"
-        else:
-            bot_crop = ""
-        filter_parts.append(
-            f"[vbot_in]{bot_crop}"
-            f"scale={out_w}:{bot_h}:force_original_aspect_ratio=increase,"
-            f"crop={out_w}:{bot_h}[vbot]"
-        )
-        filter_parts.append("[vtop][vbot]vstack=inputs=2[vframed]")
-        cur_v = "vframed"
-    elif framing.mode == "fit":
-        filter_parts.append(f"[{cur_v}]split=2[vbg_in][vfg_in]")
-        filter_parts.append(
-            f"[vbg_in]scale={out_w}:{out_h}:force_original_aspect_ratio=increase,"
-            f"crop={out_w}:{out_h},gblur=sigma=24[vbg]"
-        )
-        filter_parts.append(
-            f"[vfg_in]scale={out_w}:{out_h}:force_original_aspect_ratio=decrease[vfg]"
-        )
-        filter_parts.append("[vbg][vfg]overlay=(W-w)/2:(H-h)/2[vframed]")
         cur_v = "vframed"
     else:
-        # centre / crop
-        filter_parts.append(
-            f"[{cur_v}]scale={out_w}:{out_h}:force_original_aspect_ratio=increase,"
-            f"crop={out_w}:{out_h}[vframed]"
-        )
+        k = len(framing_segments)
+        split_outs = "".join(f"[vf_src_{i}]" for i in range(k))
+        filter_parts.append(f"[{cur_v}]split={k}{split_outs}")
+        framed_outs: list[str] = []
+        for i, f_seg in enumerate(framing_segments):
+            s_sec = max(0.0, f_seg.timeline_start_ms / 1000.0)
+            e_sec = max(s_sec + 0.05, f_seg.timeline_end_ms / 1000.0)
+            trimmed_lbl = f"vf_trim_{i}"
+            out_lbl = f"vf_out_{i}"
+            filter_parts.append(
+                f"[vf_src_{i}]trim=start={s_sec:.3f}:end={e_sec:.3f},setpts=PTS-STARTPTS[{trimmed_lbl}]"
+            )
+            filter_parts.extend(
+                _build_framing_segment_filters(
+                    trimmed_lbl, out_lbl, f_seg, out_w=out_w, out_h=out_h, tag=f"f{i}"
+                )
+            )
+            framed_outs.append(f"[{out_lbl}]")
+        filter_parts.append(f"{''.join(framed_outs)}concat=n={k}:v=1:a=0[vframed]")
         cur_v = "vframed"
 
     # 3. Render & composite 2x supersampled Pillow RGBA overlays

@@ -21,6 +21,7 @@ from ..ai import (
     detect_webcam_box,
     discover_highlights,
     select_hot_windows,
+    transcribe_hot_windows,
     transcribe_wav,
 )
 from ..audio import (
@@ -220,12 +221,18 @@ def run_job_pipeline_sync(
             extra_event={"hypeCurve": compact_curve},
         )
 
-        # Stage 3: Hybrid ASR transcription
+        # Stage 3: Hybrid ASR transcription (hot-window scoped on long VODs > 25 min!)
         prompt_terms = ", ".join(
             t for t in [profile.creator_name, profile.name, *profile.keyword_filters] if t
         )
-        with track_stage(job_id, "transcribe"):
-            transcript = transcriber(wav_path, initial_prompt=prompt_terms, settings=cfg)
+        with track_stage(job_id, "transcribe", windows=len(hot_windows)):
+            transcript = transcribe_hot_windows(
+                wav_path,
+                hot_windows,
+                initial_prompt=prompt_terms,
+                settings=cfg,
+                transcriber_fn=transcriber,
+            )
 
         # Stage 4: Brief-tuned Highlight & Hook-Card discovery
         _update_job(job_id, stage="highlights", progress=0.62, bus=bus)
@@ -273,7 +280,7 @@ def run_job_pipeline_sync(
                 thumb_path = extract_frame_jpeg(source_path, clip_dir / "thumb.jpg", mid_ms)
 
                 if not cam_checked:
-                    detected_cam_box = webcam_detector(thumb_path, profile)
+                    detected_cam_box = profile.cam_box or webcam_detector(thumb_path, profile)
                     cam_checked = True
 
                 raw_clip_words = _slice_words_for_clip(transcript.words, cand.start_ms, cand.end_ms)
@@ -321,6 +328,15 @@ def run_job_pipeline_sync(
                     bus=bus,
                     extra_event={"clipsCreated": len(created_ids)},
                 )
+
+        # Optional Stage 6: Auto-Export draft MP4s when CreatorProfile.auto_export is enabled
+        if profile.auto_export and created_ids:
+            from .exports import export_clip_project
+
+            _update_job(job_id, stage="auto_export", progress=0.97, bus=bus)
+            for pid in created_ids[:3]:
+                with contextlib.suppress(Exception):
+                    export_clip_project(pid, speed_preset="draft")
 
         _update_job(
             job_id,

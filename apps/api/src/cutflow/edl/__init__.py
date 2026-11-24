@@ -6,8 +6,10 @@ from .ops import (
     TimelineMapper,
     apply_blade_cut,
     apply_edl_patch,
+    auto_tighten_silence,
     delete_word,
     insert_word,
+    split_framing_segment,
     update_word_timing,
 )
 from .schema import (
@@ -45,7 +47,9 @@ __all__ = [
     "VideoTrack",
     "apply_blade_cut",
     "apply_edl_patch",
+    "auto_tighten_silence",
     "delete_word",
     "insert_word",
+    "split_framing_segment",
     "update_word_timing",
 ]

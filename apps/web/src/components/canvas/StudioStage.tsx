@@ -10,6 +10,7 @@ import {
 } from "lucide-react";
 import {
   formatTimecodeMs,
+  getActiveFramingAt,
   getColdOpenDurationMs,
   getTotalDurationMs,
   timelineToSource,
@@ -142,7 +143,10 @@ export function StudioStage({ mediaUrl }: StudioStageProps) {
   const totalDurationMs = useMemo(() => (edl ? getTotalDurationMs(edl) : 0), [edl]);
   const coldOpenMs = useMemo(() => (edl ? getColdOpenDurationMs(edl) : 0), [edl]);
 
-  const framing = edl?.tracks.video.framing[0] ?? null;
+  const framing = useMemo(
+    () => (edl ? getActiveFramingAt(edl, playheadMs) : null),
+    [edl, playheadMs],
+  );
   const activeSplitRatio = dragSplitRatio ?? framing?.splitRatio ?? 0.35;
   const activeCaptionMargin =
     dragCaptionMargin ?? edl?.tracks.subtitles.marginVRatio ?? 0.22;
@@ -211,10 +215,10 @@ export function StudioStage({ mediaUrl }: StudioStageProps) {
         }
       }
 
-      // Paint 60fps composite onto <canvas>
+      // Paint 60fps composite onto <canvas> honoring dynamic framing keyframes!
       const canvas = canvasRef.current;
       const ctx = canvas?.getContext("2d");
-      const seg = currentEdl.tracks.video.framing[0];
+      const seg = getActiveFramingAt(currentEdl, nextMs);
       if (canvas && ctx && seg) {
         const liveSeg: FramingSegment = {
           ...seg,
@@ -581,13 +585,40 @@ export function StudioStage({ mediaUrl }: StudioStageProps) {
                 {activeSubtitleWords.map((w) => {
                   const isCurrent =
                     playheadMs >= w.startMs && playheadMs <= w.endMs;
+                  const isKaraoke =
+                    edl.tracks.subtitles.style.preset === "karaoke_fill";
+                  const accent = edl.tracks.subtitles.style.accentColor;
+                  const primary = edl.tracks.subtitles.style.primaryColor;
+                  if (isKaraoke) {
+                    const pct =
+                      playheadMs >= w.endMs
+                        ? 100
+                        : playheadMs <= w.startMs
+                          ? 0
+                          : Math.round(
+                              ((playheadMs - w.startMs) /
+                                Math.max(1, w.endMs - w.startMs)) *
+                                100,
+                            );
+                    return (
+                      <span
+                        key={w.id}
+                        style={{
+                          backgroundImage: `linear-gradient(90deg, ${accent} ${pct}%, ${primary} ${pct}%)`,
+                          WebkitBackgroundClip: "text",
+                          backgroundClip: "text",
+                          color: "transparent",
+                        }}
+                      >
+                        {w.text}
+                      </span>
+                    );
+                  }
                   return (
                     <span
                       key={w.id}
                       style={{
-                        color: isCurrent
-                          ? edl.tracks.subtitles.style.accentColor
-                          : edl.tracks.subtitles.style.primaryColor,
+                        color: isCurrent ? accent : primary,
                       }}
                     >
                       {w.text}

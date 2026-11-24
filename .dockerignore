@@ -1,0 +1,11 @@
+.git
+**/node_modules
+**/.venv
+**/__pycache__
+**/.pytest_cache
+**/.ruff_cache
+apps/web/dist
+apps/web/dist-demo
+*.db
+*.log
+.cutflow

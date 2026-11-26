@@ -15,12 +15,14 @@ dependencies = [
     "jsonschema>=4.23.0",
     "keyring>=25.5.0",
     "numpy>=2.0.0",
+    "opencv-python-headless>=4.10.0",
     "pillow>=11.0.0",
     "pydantic>=2.10.0",
     "python-multipart>=0.0.18",
     "sqlalchemy>=2.0.36",
     "typer>=0.15.0",
     "uvicorn[standard]>=0.32.0",
+    "yt-dlp>=2025.1.15",
 ]
 
 [project.optional-dependencies]
@@ -31,7 +33,6 @@ dev = [
 ]
 ml = [
     "faster-whisper>=1.1.0",
-    "yt-dlp>=2025.1.15",
 ]
 
 [project.scripts]

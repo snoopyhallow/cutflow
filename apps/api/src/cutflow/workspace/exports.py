@@ -74,8 +74,31 @@ def export_clip_project(
         edl = TimelineProject.model_validate(proj.edl_json)
         title = proj.title or edl.title or proj.id
 
+        # Resolve per-source media paths for multi-source Theme Mashup EDLs
+        source_media_map: dict[str, tuple[Path, int]] = {
+            proj.source_id: (media_path, input_origin_ms)
+        }
+        extra_src_ids = {
+            sl.source_id
+            for sl in edl.tracks.video.clips
+            if sl.source_id and sl.source_id not in source_media_map
+        }
+        for sid in extra_src_ids:
+            extra_src = session.get(SourceRow, sid)
+            if extra_src is not None and not extra_src.archived and extra_src.path:
+                raw_p = Path(extra_src.path)
+                if raw_p.is_file():
+                    source_media_map[sid] = (raw_p, 0)
+                    continue
+            alt_proj = session.scalar(
+                select(ClipProjectRow).where(ClipProjectRow.source_id == sid)
+            )
+            if alt_proj is not None:
+                alt_job = session.get(JobRow, alt_proj.job_id)
+                source_media_map[sid] = _resolve_render_media(alt_proj, extra_src, alt_job)
+
     render_edl = edl.model_copy(deep=True)
-    if ratio in ("9:16", "1:1", "16:9"):
+    if ratio in ("9:16", "4:5", "1:1", "16:9"):
         render_edl.output.ratio = ratio  # type: ignore[assignment]
     if quality in ("720p", "1080p", "1440p", "4k"):
         render_edl.output.quality = quality  # type: ignore[assignment]
@@ -105,6 +128,7 @@ def export_clip_project(
             output_path=out_mp4,
             scratch_dir=scratch_dir,
             input_origin_ms=input_origin_ms,
+            source_media_map=source_media_map,
             prefer_nvenc=cfg.export.prefer_hardware_encoder,
         )
 

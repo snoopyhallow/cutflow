@@ -1,14 +1,14 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
-  Clapperboard,
-  Film,
-  LayoutDashboard,
-  Redo2,
-  Settings,
-  Sparkles,
-  Undo2,
-  Users,
-} from "lucide-react";
+  ArrowClockwise,
+  ArrowCounterClockwise,
+  Export,
+  Scissors,
+  Sliders,
+  TrayArrowDown,
+  UserFocus,
+} from "@phosphor-icons/react";
+import { CutFlowLogo } from "./components/ui/BrandIcons";
 import { getColdOpenDurationMs, getTotalDurationMs } from "./edl";
 import { CreatorsPage } from "./pages/CreatorsPage";
 import { DashboardPage } from "./pages/DashboardPage";
@@ -16,12 +16,14 @@ import { EditorStudioPage } from "./pages/EditorStudioPage";
 import { ExportsPage } from "./pages/ExportsPage";
 import {
   SettingsPage,
+  type IngestSettingsState,
   type ModelRoutingState,
 } from "./pages/SettingsPage";
 import { useTimelineStore } from "./state/timelineStore";
 import {
   createTransport,
   DemoTransport,
+  type BgmAssetItem,
   type ClipProjectSummary,
   type ClipStatus,
   type CreatorProfile,
@@ -35,7 +37,15 @@ import {
   type StudioTransport,
 } from "./transport";
 
-type StudioTab = "dashboard" | "creators" | "editor" | "exports" | "settings";
+type StudioTab = "dashboard" | "editor" | "creators" | "exports" | "settings";
+
+const TAB_TITLES: Record<StudioTab, string> = {
+  dashboard: "Media & Ingest",
+  editor: "Cut Room",
+  creators: "Creator Profiles",
+  exports: "Render Queue",
+  settings: "Studio Settings",
+};
 
 export default function App() {
   const [activeTab, setActiveTab] = useState<StudioTab>("dashboard");
@@ -46,6 +56,7 @@ export default function App() {
   const [sources, setSources] = useState<SourceSummary[]>([]);
   const [jobs, setJobs] = useState<JobSummary[]>([]);
   const [projects, setProjects] = useState<ClipProjectSummary[]>([]);
+  const [bgmAssets, setBgmAssets] = useState<BgmAssetItem[]>([]);
   const [exportsList, setExportsList] = useState<ExportSummary[]>([]);
   const [exportingNow, setExportingNow] = useState(false);
   const [feedItems, setFeedItems] = useState<FeedItem[]>([]);
@@ -58,6 +69,10 @@ export default function App() {
     scan_model: "gemini-2.5-flash",
     editor_model: "gemini-2.5-flash",
     ollama_url: "http://127.0.0.1:11434",
+  });
+  const [ingestConfig, setIngestConfig] = useState<IngestSettingsState>({
+    cookies_browser: "none",
+    concurrent_fragments: 8,
   });
   const [keysPresent, setKeysPresent] = useState<Record<string, boolean>>({});
   const [statusMessage, setStatusMessage] = useState<string>("");
@@ -80,6 +95,7 @@ export default function App() {
       loadedSources,
       loadedJobs,
       loadedProjects,
+      loadedBgm,
       loadedExports,
       loadedFeed,
       loadedStorage,
@@ -89,6 +105,7 @@ export default function App() {
       activeTransport.listSources(),
       activeTransport.listJobs(),
       activeTransport.listProjects(),
+      activeTransport.listBgm().catch(() => [] as BgmAssetItem[]),
       activeTransport.listExports(),
       activeTransport.listFeed(),
       activeTransport.getStorageSummary(),
@@ -99,6 +116,7 @@ export default function App() {
     setSources(loadedSources);
     setJobs(loadedJobs);
     setProjects(loadedProjects);
+    setBgmAssets(loadedBgm);
     setExportsList(loadedExports);
     setFeedItems(loadedFeed);
     setStorage(loadedStorage);
@@ -117,6 +135,15 @@ export default function App() {
         scan_model: modCfg.scan_model ?? "gemini-2.5-flash",
         editor_model: modCfg.editor_model ?? "gemini-2.5-flash",
         ollama_url: modCfg.providers?.ollama?.base_url ?? "http://127.0.0.1:11434",
+      });
+    }
+    const ingCfg = loadedSettings.settings?.ingest as
+      | { cookies_browser?: string; concurrent_fragments?: number }
+      | undefined;
+    if (ingCfg) {
+      setIngestConfig({
+        cookies_browser: ingCfg.cookies_browser ?? "none",
+        concurrent_fragments: ingCfg.concurrent_fragments ?? 8,
       });
     }
     const expCfg = loadedSettings.settings?.export as
@@ -156,6 +183,7 @@ export default function App() {
                   stage: evt.stage,
                   progress: evt.progress,
                   error: evt.error,
+                  downloadDetail: evt.detail ?? j.downloadDetail,
                   hypeCurve: evt.hypeCurve ?? j.hypeCurve,
                   clipCount: evt.clipsCreated ?? evt.projectIds?.length ?? j.clipCount,
                 }
@@ -197,8 +225,8 @@ export default function App() {
         await loadEditorProject(active, loadedProjects[0].id);
       } else {
         const fallback = new DemoTransport();
-        const tl = await fallback.getTimeline("clip_demo_001");
-        const peaks = await fallback.getProjectPeaks("clip_demo_001");
+        const tl = await fallback.getTimeline("clip_demo_cinema");
+        const peaks = await fallback.getProjectPeaks("clip_demo_cinema");
         if (!cancelled) {
           setActiveProjectId(null);
           loadProject(tl.edl, 0);
@@ -385,181 +413,272 @@ export default function App() {
     return transport.projectMediaUrl(activeProjectId);
   }, [activeProjectId, projects, transport]);
 
-  const navItems: { id: StudioTab; label: string; icon: typeof LayoutDashboard }[] = [
-    { id: "dashboard", label: "Dashboard", icon: LayoutDashboard },
-    { id: "creators", label: "Creators", icon: Users },
-    { id: "editor", label: "Editor", icon: Clapperboard },
-    { id: "exports", label: "Exports", icon: Film },
-    { id: "settings", label: "Settings", icon: Settings },
+  const activeFilmstripUrl = useMemo(() => {
+    if (!activeProjectId) return null;
+    const summary = projects.find((p) => p.id === activeProjectId);
+    if (!summary?.hasFilmstrip) return null;
+    return transport.projectFilmstripUrl(activeProjectId);
+  }, [activeProjectId, projects, transport]);
+
+  const runningJobsCount = jobs.filter(
+    (j) => j.status === "queued" || j.status === "running",
+  ).length;
+
+  const railItems: {
+    id: StudioTab;
+    label: string;
+    icon: typeof TrayArrowDown;
+    badge?: number;
+  }[] = [
+    {
+      id: "dashboard",
+      label: "Media & Ingest",
+      icon: TrayArrowDown,
+      badge: runningJobsCount > 0 ? runningJobsCount : undefined,
+    },
+    { id: "editor", label: "Cut Room", icon: Scissors },
+    { id: "creators", label: "Creator Profiles", icon: UserFocus },
+    {
+      id: "exports",
+      label: "Render Queue",
+      icon: Export,
+      badge: exportsList.length > 0 ? exportsList.length : undefined,
+    },
+    { id: "settings", label: "Studio Settings", icon: Sliders },
   ];
 
   return (
-    <div className="flex h-screen flex-col overflow-hidden bg-[#0B0D12] text-[#F1F5F9]">
-      {/* Top Studio Header */}
-      <header className="flex h-12 shrink-0 items-center justify-between border-b border-[#222836] bg-[#131720] px-4">
-        <div className="flex items-center gap-6">
-          <div className="flex items-center gap-2">
-            <div className="flex h-7 w-7 items-center justify-center rounded-md bg-[#6366F1] text-white shadow-sm">
-              <Sparkles className="h-4 w-4" />
-            </div>
-            <span className="text-sm font-semibold tracking-tight">CutFlow</span>
-            <span className="rounded bg-[#1A202C] px-1.5 py-0.5 text-[10px] font-medium uppercase tracking-wider text-[#94A3B8]">
-              Studio v0.1
-            </span>
-          </div>
+    <div className="flex h-screen overflow-hidden bg-[#09090B] text-[#F4F4F5]">
+      {/* Desktop Studio Left Icon Rail */}
+      <aside
+        aria-label="Primary Navigation"
+        className="flex w-[54px] shrink-0 flex-col items-center justify-between border-r border-[#222228] bg-[#0C0C0F] py-2.5"
+      >
+        <div className="flex flex-col items-center gap-3">
+          <button
+            type="button"
+            onClick={() => setActiveTab("dashboard")}
+            title="CutFlow Studio"
+            className="flex h-9 w-9 items-center justify-center rounded-lg border border-[#282830] bg-[#141418] text-[#F4F4F5] transition-colors hover:border-[#3A3A44]"
+          >
+            <CutFlowLogo className="h-5 w-5" />
+          </button>
 
-          <nav className="flex items-center gap-1" aria-label="Workspace Tabs">
-            {navItems.map((item) => {
+          <div className="h-px w-6 bg-[#222228]" />
+
+          <nav className="flex flex-col items-center gap-1.5" aria-label="Workspace Views">
+            {railItems.map((item) => {
               const Icon = item.icon;
               const isActive = activeTab === item.id;
               return (
                 <button
                   key={item.id}
                   type="button"
+                  title={item.label}
+                  aria-label={item.label}
                   onClick={() => setActiveTab(item.id)}
-                  className={`flex items-center gap-1.5 rounded-md px-2.5 py-1.5 text-xs font-medium transition-colors ${
+                  className={`group relative flex h-9 w-9 items-center justify-center rounded-md transition-colors ${
                     isActive
-                      ? "bg-[#6366F1]/15 text-[#F1F5F9] ring-1 ring-[#6366F1]/40"
-                      : "text-[#94A3B8] hover:bg-[#1A202C] hover:text-[#F1F5F9]"
+                      ? "bg-[#1C1C22] text-[#F4F4F5]"
+                      : "text-[#71717A] hover:bg-[#151519] hover:text-[#D4D4D8]"
                   }`}
                 >
-                  <Icon className="h-3.5 w-3.5" />
-                  {item.label}
+                  {isActive && (
+                    <span className="absolute -left-[9px] h-5 w-[2.5px] rounded-r bg-[#F59E0B]" />
+                  )}
+                  <Icon
+                    weight={isActive ? "fill" : "regular"}
+                    className="h-[18px] w-[18px]"
+                  />
+                  {item.badge !== undefined && (
+                    <span className="tabular-tc absolute -right-0.5 -top-0.5 flex h-3.5 min-w-[14px] items-center justify-center rounded-full bg-[#F59E0B] px-1 text-[9px] font-bold text-[#09090B]">
+                      {item.badge}
+                    </span>
+                  )}
                 </button>
               );
             })}
           </nav>
         </div>
 
-        <div className="flex items-center gap-2">
-          {statusMessage && activeTab === "editor" && (
-            <span className="max-w-xs truncate rounded border border-[#F59E0B]/40 bg-[#F59E0B]/10 px-2 py-0.5 text-[11px] text-[#FDE68A]">
-              {statusMessage}
+        <div className="flex flex-col items-center gap-2 pb-1">
+          <span
+            title={
+              transport.mode === "local"
+                ? `Connected to Local API (${health?.database ?? "sqlite"})`
+                : "Running in Browser Demo Mode"
+            }
+            className="flex h-6 w-6 items-center justify-center rounded border border-[#222228] bg-[#111114]"
+          >
+            <span
+              className={`h-2 w-2 rounded-full ${
+                transport.mode === "local" ? "bg-[#22C55E]" : "bg-[#F59E0B]"
+              }`}
+            />
+          </span>
+        </div>
+      </aside>
+
+      {/* Right Studio Column: Slim Context Topbar + Active Workspace */}
+      <div className="flex min-w-0 flex-1 flex-col overflow-hidden">
+        <header className="flex h-10 shrink-0 items-center justify-between border-b border-[#222228] bg-[#0E0E11] px-4">
+          <div className="flex min-w-0 items-center gap-2 text-xs">
+            <span className="font-semibold tracking-tight text-[#F4F4F5]">CutFlow</span>
+            <span className="text-[#3F3F46]">/</span>
+            <span className="font-medium text-[#A1A1AA]">{TAB_TITLES[activeTab]}</span>
+            {activeTab === "editor" && edl && (
+              <>
+                <span className="text-[#3F3F46]">/</span>
+                <span className="max-w-[260px] truncate font-medium text-[#F4F4F5]">
+                  {edl.title}
+                </span>
+                <span className="tabular-tc rounded border border-[#27272F] bg-[#16161B] px-1.5 py-0.5 text-[10px] text-[#A1A1AA]">
+                  {edl.output.ratio} · {edl.output.quality}
+                </span>
+              </>
+            )}
+          </div>
+
+          <div className="flex items-center gap-2">
+            {statusMessage && (
+              <button
+                type="button"
+                onClick={() => setStatusMessage("")}
+                title="Click to dismiss"
+                className="max-w-xs truncate rounded border border-[#F59E0B]/40 bg-[#F59E0B]/10 px-2 py-0.5 text-[11px] text-[#FDE68A]"
+              >
+                {statusMessage}
+              </button>
+            )}
+
+            {activeTab === "editor" && (
+              <div className="flex items-center gap-1 border-r border-[#222228] pr-2.5">
+                <button
+                  type="button"
+                  onClick={undo}
+                  disabled={undoStack.length === 0}
+                  title="Undo (Ctrl+Z)"
+                  className="inline-flex items-center gap-1 rounded px-1.5 py-1 text-[11px] text-[#A1A1AA] transition-colors hover:bg-[#18181C] hover:text-[#F4F4F5] disabled:opacity-30"
+                >
+                  <ArrowCounterClockwise className="h-3.5 w-3.5" />
+                  {undoStack.length > 0 && (
+                    <span className="tabular-tc text-[10px]">{undoStack.length}</span>
+                  )}
+                </button>
+                <button
+                  type="button"
+                  onClick={redo}
+                  disabled={redoStack.length === 0}
+                  title="Redo (Ctrl+Shift+Z)"
+                  className="inline-flex items-center gap-1 rounded px-1.5 py-1 text-[11px] text-[#A1A1AA] transition-colors hover:bg-[#18181C] hover:text-[#F4F4F5] disabled:opacity-30"
+                >
+                  <ArrowClockwise className="h-3.5 w-3.5" />
+                  {redoStack.length > 0 && (
+                    <span className="tabular-tc text-[10px]">{redoStack.length}</span>
+                  )}
+                </button>
+                {dirty && (
+                  <span className="tabular-tc ml-1 text-[10px] text-[#F59E0B]">Saving</span>
+                )}
+              </div>
+            )}
+
+            <span className="tabular-tc inline-flex items-center gap-1.5 rounded border border-[#222228] bg-[#141418] px-2 py-0.5 text-[10px] font-medium text-[#A1A1AA]">
+              <span
+                className={`h-1.5 w-1.5 rounded-full ${
+                  transport.mode === "local" ? "bg-[#22C55E]" : "bg-[#F59E0B]"
+                }`}
+              />
+              {transport.mode === "local"
+                ? `LOCAL · ${(health?.database ?? "sqlite").toUpperCase()}`
+                : "DEMO STUDIO"}
             </span>
+          </div>
+        </header>
+
+        <main className="min-h-0 flex-1 overflow-hidden">
+          {activeTab === "dashboard" && (
+            <DashboardPage
+              transport={transport}
+              profiles={profiles}
+              selectedProfileId={selectedProfileId}
+              onSelectProfileId={setSelectedProfileId}
+              sources={sources}
+              jobs={jobs}
+              projects={projects}
+              feedItems={feedItems}
+              storage={storage}
+              onRefreshAll={async () => {
+                await refreshWorkspace(transport);
+              }}
+              onJobStarted={(job) => {
+                setJobs((prev) => [job, ...prev.filter((j) => j.id !== job.id)]);
+                attachJobStream(transport, job.id);
+              }}
+              onOpenProject={(id) => void handleOpenProject(id)}
+            />
+          )}
+
+          {activeTab === "creators" && (
+            <CreatorsPage
+              transport={transport}
+              profiles={profiles}
+              bgmAssets={bgmAssets}
+              onCreated={async () => {
+                await refreshWorkspace(transport);
+              }}
+            />
           )}
 
           {activeTab === "editor" && (
-            <div className="mr-2 flex items-center gap-1 border-r border-[#222836] pr-3">
-              <button
-                type="button"
-                onClick={undo}
-                disabled={undoStack.length === 0}
-                title="Undo (Ctrl+Z)"
-                className="inline-flex items-center gap-1 rounded px-1.5 py-1 text-[11px] text-[#94A3B8] transition-colors hover:bg-[#1A202C] hover:text-white disabled:opacity-35"
-              >
-                <Undo2 className="h-3.5 w-3.5" />
-                {undoStack.length > 0 && (
-                  <span className="tabular-tc text-[10px]">{undoStack.length}</span>
-                )}
-              </button>
-              <button
-                type="button"
-                onClick={redo}
-                disabled={redoStack.length === 0}
-                title="Redo (Ctrl+Shift+Z)"
-                className="inline-flex items-center gap-1 rounded px-1.5 py-1 text-[11px] text-[#94A3B8] transition-colors hover:bg-[#1A202C] hover:text-white disabled:opacity-35"
-              >
-                <Redo2 className="h-3.5 w-3.5" />
-                {redoStack.length > 0 && (
-                  <span className="tabular-tc text-[10px]">{redoStack.length}</span>
-                )}
-              </button>
-              {dirty && (
-                <span className="ml-1 text-[11px] text-[#F59E0B]">Saving...</span>
-              )}
-            </div>
+            <EditorStudioPage
+              transport={transport}
+              projects={projects}
+              bgmAssets={bgmAssets}
+              activeProjectId={activeProjectId}
+              mediaUrl={activeMediaUrl}
+              filmstripUrl={activeFilmstripUrl}
+              peaks={activePeaks}
+              exportingNow={exportingNow}
+              initialBoundaries={editorBoundaries}
+              onSelectProject={(id) => void handleOpenProject(id)}
+              onUpdateProjectStatus={handleUpdateProjectStatus}
+              onRefreshBgm={async () => {
+                const updated = await transport.listBgm();
+                setBgmAssets(updated);
+              }}
+              onExportNow={handleExportActiveProject}
+              onError={setStatusMessage}
+            />
           )}
 
-          <span
-            className={`inline-flex items-center gap-1.5 rounded-full border px-2.5 py-0.5 text-[11px] font-medium ${
-              transport.mode === "local"
-                ? "border-[#10B981]/30 bg-[#10B981]/10 text-[#10B981]"
-                : "border-[#38BDF8]/30 bg-[#38BDF8]/10 text-[#38BDF8]"
-            }`}
-          >
-            <span className="h-1.5 w-1.5 rounded-full bg-current" />
-            {transport.mode === "local"
-              ? `Local API (${health?.database ?? "sqlite"})`
-              : "Demo Mode"}
-          </span>
-        </div>
-      </header>
+          {activeTab === "exports" && (
+            <ExportsPage
+              transport={transport}
+              projects={projects}
+              exportsList={exportsList}
+              onOpenProject={(id) => void handleOpenProject(id)}
+              onUpdateProjectStatus={handleUpdateProjectStatus}
+              onRefresh={async () => {
+                await refreshWorkspace(transport);
+              }}
+            />
+          )}
 
-      {/* Main Workspace Area */}
-      <main className="min-h-0 flex-1 overflow-hidden">
-        {activeTab === "dashboard" && (
-          <DashboardPage
-            transport={transport}
-            profiles={profiles}
-            selectedProfileId={selectedProfileId}
-            onSelectProfileId={setSelectedProfileId}
-            sources={sources}
-            jobs={jobs}
-            projects={projects}
-            feedItems={feedItems}
-            storage={storage}
-            onRefreshAll={async () => {
-              await refreshWorkspace(transport);
-            }}
-            onJobStarted={(job) => {
-              setJobs((prev) => [job, ...prev.filter((j) => j.id !== job.id)]);
-              attachJobStream(transport, job.id);
-            }}
-            onOpenProject={(id) => void handleOpenProject(id)}
-          />
-        )}
-
-        {activeTab === "creators" && (
-          <CreatorsPage
-            transport={transport}
-            profiles={profiles}
-            onCreated={async () => {
-              await refreshWorkspace(transport);
-            }}
-          />
-        )}
-
-        {activeTab === "editor" && (
-          <EditorStudioPage
-            transport={transport}
-            projects={projects}
-            activeProjectId={activeProjectId}
-            mediaUrl={activeMediaUrl}
-            peaks={activePeaks}
-            exportingNow={exportingNow}
-            initialBoundaries={editorBoundaries}
-            onSelectProject={(id) => void handleOpenProject(id)}
-            onUpdateProjectStatus={handleUpdateProjectStatus}
-            onExportNow={handleExportActiveProject}
-            onError={setStatusMessage}
-          />
-        )}
-
-        {activeTab === "exports" && (
-          <ExportsPage
-            transport={transport}
-            projects={projects}
-            exportsList={exportsList}
-            onOpenProject={(id) => void handleOpenProject(id)}
-            onUpdateProjectStatus={handleUpdateProjectStatus}
-            onRefresh={async () => {
-              await refreshWorkspace(transport);
-            }}
-          />
-        )}
-
-        {activeTab === "settings" && (
-          <SettingsPage
-            transport={transport}
-            keysPresent={keysPresent}
-            initialModels={modelRouting}
-            initialBoundaries={editorBoundaries}
-            onRefresh={async () => {
-              await refreshWorkspace(transport);
-            }}
-          />
-        )}
-      </main>
+          {activeTab === "settings" && (
+            <SettingsPage
+              transport={transport}
+              keysPresent={keysPresent}
+              initialModels={modelRouting}
+              initialIngest={ingestConfig}
+              initialBoundaries={editorBoundaries}
+              onRefresh={async () => {
+                await refreshWorkspace(transport);
+              }}
+            />
+          )}
+        </main>
+      </div>
     </div>
   );
 }

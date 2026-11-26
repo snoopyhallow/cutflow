@@ -1,4 +1,4 @@
-import type { NormalizedBox, TimelineProject } from "../edl";
+import type { BgmTrack, NormalizedBox, TimelineProject, VideoSlice } from "../edl";
 
 export interface HealthResponse {
   status: string;
@@ -13,38 +13,75 @@ export interface CreatorProfile {
   name: string;
   creator_name: string;
   brief: string;
+  content_mode?: string;
+  preferred_lang?: string;
   min_duration_s: number;
   max_duration_s: number;
   max_clips: number;
+  default_ratio?: string;
   layout_mode: string;
+  fit_backdrop?: string;
   split_ratio: number;
+  border_style?: string;
+  cinema_grade?: string;
   title_card_style: string;
   cold_open_enabled: boolean;
   cold_open_duration_ms: number;
   cta_mode: string;
   cta_text: string;
+  watermark_text?: string;
+  watermark_opacity?: number;
+  show_cinema_credit?: boolean;
+  transition_style?: string;
+  transition_sfx?: string;
+  bgm_mode?: string;
+  bgm_mood?: string;
+  bgm_asset_id?: string;
+  dialogue_enhance?: boolean;
+  auto_tighten_silence?: boolean;
   reveal_mode: string;
   caption_style: string;
   burn_captions: boolean;
   censor_profanity: boolean;
+  margin_v_ratio?: number;
   editor_boundaries: string;
   channel_urls: string[];
   keyword_filters: string[];
   auto_queue_feed: boolean;
   auto_export: boolean;
   inbox_path: string;
+  cam_box?: NormalizedBox | null;
 }
 
 export interface ProfileCreateInput {
   name: string;
   creator_name?: string;
   brief?: string;
+  content_mode?: string;
+  preferred_lang?: string;
   min_duration_s?: number;
   max_duration_s?: number;
   max_clips?: number;
+  default_ratio?: string;
   layout_mode?: string;
-  reveal_mode?: string;
+  fit_backdrop?: string;
+  border_style?: string;
+  cinema_grade?: string;
   title_card_style?: string;
+  cold_open_enabled?: boolean;
+  watermark_text?: string;
+  show_cinema_credit?: boolean;
+  transition_style?: string;
+  transition_sfx?: string;
+  bgm_mode?: string;
+  bgm_mood?: string;
+  bgm_asset_id?: string;
+  dialogue_enhance?: boolean;
+  auto_tighten_silence?: boolean;
+  reveal_mode?: string;
+  caption_style?: string;
+  margin_v_ratio?: number;
+  auto_export?: boolean;
   channel_urls?: string[];
   keyword_filters?: string[];
 }
@@ -63,6 +100,30 @@ export interface SourceSummary {
   createdAt: string;
 }
 
+export interface UrlProbeChapter {
+  title: string;
+  startS: number;
+  endS: number;
+}
+
+export interface UrlProbeResponse {
+  url: string;
+  platform: string;
+  title: string;
+  channel: string;
+  durationS: number;
+  thumbnailUrl: string | null;
+  isLive: boolean;
+  chapters: UrlProbeChapter[];
+}
+
+export interface UrlIngestOptions {
+  profileId?: string;
+  title?: string;
+  startSec?: number;
+  endSec?: number;
+}
+
 export interface HypeCurvePoint {
   startS: number;
   endS: number;
@@ -78,6 +139,7 @@ export interface JobSummary {
   stage: string;
   progress: number;
   error: string | null;
+  downloadDetail?: string | null;
   clipCount: number;
   hypeCurve: HypeCurvePoint[];
   createdAt: string;
@@ -92,6 +154,7 @@ export interface JobProgressEvent {
   stage: string;
   progress: number;
   error: string | null;
+  detail?: string;
   hypeCurve?: HypeCurvePoint[];
   clipsCreated?: number;
   projectIds?: string[];
@@ -111,8 +174,41 @@ export interface ClipProjectSummary {
   hasSlice: boolean;
   hasPeaks: boolean;
   hasThumb: boolean;
+  hasFilmstrip?: boolean;
   createdAt: string;
   updatedAt: string;
+}
+
+export interface MashupCreateInput {
+  projectIds: string[];
+  title?: string;
+  povHook?: string;
+  profileId?: string;
+  transitionStyle?: NonNullable<VideoSlice["transitionIn"]>;
+  transitionSfx?: NonNullable<VideoSlice["transitionSfx"]>;
+  maxSliceDurationMs?: number;
+}
+
+export interface MashupCreateResponse {
+  id: string;
+  jobId: string;
+  sourceId: string;
+  title: string;
+  totalDurationMs: number;
+  sliceCount: number;
+  wordCount: number;
+  edl: TimelineProject;
+}
+
+export interface BgmAssetItem {
+  id: string;
+  name: string;
+  filename: string;
+  mood: string;
+  durationMs: number;
+  sizeBytes: number;
+  dropOffsetMs: number;
+  builtin: boolean;
 }
 
 export interface IngestResult {
@@ -170,7 +266,7 @@ export interface ExportSummary {
 }
 
 export interface ExportRequestOptions {
-  ratio?: "9:16" | "1:1" | "16:9";
+  ratio?: "9:16" | "4:5" | "1:1" | "16:9";
   quality?: "720p" | "1080p" | "1440p" | "4k";
   speedPreset?: "draft" | "final";
 }
@@ -224,6 +320,8 @@ export interface DoctorReport {
   inboxRoot: string;
 }
 
+export type BgmPatch = Partial<BgmTrack> & { enabled?: boolean };
+
 /**
  * Clean transport abstraction enabling the exact same CutFlow Studio UI to talk
  * to local FastAPI (`HttpTransport`) or run in zero-cost browser Demo Mode (`DemoTransport`).
@@ -241,9 +339,20 @@ export interface StudioTransport {
     splitRatio: number,
   ): Promise<CreatorProfile>;
   listSources(): Promise<SourceSummary[]>;
-  uploadVideo(file: File, profileId?: string): Promise<IngestResult>;
-  ingestUrl(url: string, profileId?: string): Promise<IngestResult>;
-  archiveSource(sourceId: string): Promise<{ sourceId: string; archived: boolean; reclaimedBytes: number }>;
+  uploadVideo(
+    file: File,
+    profileId?: string,
+    subtitleFile?: File | null,
+  ): Promise<IngestResult>;
+  probeUrl(url: string): Promise<UrlProbeResponse>;
+  ingestUrl(
+    url: string,
+    profileId?: string,
+    opts?: UrlIngestOptions,
+  ): Promise<IngestResult>;
+  archiveSource(
+    sourceId: string,
+  ): Promise<{ sourceId: string; archived: boolean; reclaimedBytes: number }>;
   getStorageSummary(): Promise<StorageSummary>;
   listJobs(): Promise<JobSummary[]>;
   subscribeJobEvents(
@@ -251,11 +360,17 @@ export interface StudioTransport {
     onEvent: (evt: JobProgressEvent) => void,
   ): () => void;
   listProjects(jobId?: string): Promise<ClipProjectSummary[]>;
+  createMashup(input: MashupCreateInput): Promise<MashupCreateResponse>;
   getTimeline(projectId: string): Promise<TimelineResponse>;
   saveTimeline(projectId: string, edl: TimelineProject): Promise<TimelineResponse>;
   getProjectPeaks(projectId: string): Promise<ProjectPeaks>;
   projectMediaUrl(projectId: string): string | null;
   projectThumbUrl(projectId: string): string | null;
+  projectFilmstripUrl(projectId: string): string | null;
+  listBgm(): Promise<BgmAssetItem[]>;
+  uploadBgm(file: File, name?: string, mood?: string): Promise<BgmAssetItem>;
+  bgmMediaUrl(assetId: string): string | null;
+  deleteBgm(assetId: string): Promise<void>;
   exportProject(
     projectId: string,
     opts?: ExportRequestOptions,

@@ -1,16 +1,17 @@
 import { useState } from "react";
 import {
   Check,
-  Clapperboard,
+  CircleNotch,
   Copy,
-  Download,
-  Film,
-  Loader2,
-  Rocket,
-  Sparkles,
-  Trash2,
-  Zap,
-} from "lucide-react";
+  DownloadSimple,
+  Export,
+  FilmSlate,
+  Lightning,
+  NotePencil,
+  Scissors,
+  Trash,
+} from "@phosphor-icons/react";
+import { StudioSelect } from "../components/ui/StudioControls";
 import { formatTimecodeMs } from "../edl";
 import type {
   ClipProjectSummary,
@@ -99,28 +100,30 @@ export function ExportsPage({
   return (
     <div className="h-full overflow-y-auto px-6 py-5">
       <div className="mx-auto max-w-5xl space-y-6">
-        <div>
-          <h1 className="text-base font-semibold">Exports &amp; Social Delivery Queue</h1>
-          <p className="mt-0.5 text-xs text-[#94A3B8]">
-            Approve clips (Draft → Approved → Exported → Posted), render Draft or Final MP4s, and
-            generate 1-click TikTok / Shorts / Reels post copy.
+        <div className="border-b border-[#222228] pb-3.5">
+          <h1 className="text-base font-semibold tracking-tight text-[#F4F4F5]">
+            Render Queue &amp; Delivery
+          </h1>
+          <p className="mt-0.5 text-xs text-[#A1A1AA]">
+            Approve timelines, compile hardware-accelerated H.264/AAC masters, and generate social
+            distribution copy.
           </p>
         </div>
 
         {error && (
-          <div className="rounded-lg border border-[#F43F5E]/40 bg-[#F43F5E]/10 px-3 py-2 text-xs text-[#FECDD3]">
+          <div className="rounded-md border border-[#EF4444]/40 bg-[#EF4444]/10 px-3 py-2 text-xs text-[#FECACA]">
             {error}
           </div>
         )}
 
-        {/* Clips Approval, Quick Render & Post Copy */}
+        {/* Clip Approval & Render Triggers */}
         {projects.length > 0 && (
           <section className="space-y-2.5">
-            <h2 className="text-xs font-semibold uppercase tracking-wider text-[#94A3B8]">
-              Clip Pipeline ({projects.length})
+            <h2 className="text-[11px] font-semibold uppercase tracking-wider text-[#71717A]">
+              Project Staging ({projects.length})
             </h2>
-            <div className="space-y-2.5">
-              {projects.slice(0, 10).map((clip) => {
+            <div className="space-y-2">
+              {projects.slice(0, 12).map((clip) => {
                 const isDraftBusy = renderingId === `${clip.id}:draft`;
                 const isFinalBusy = renderingId === `${clip.id}:final`;
                 const anyBusy = renderingId !== null;
@@ -129,34 +132,32 @@ export function ExportsPage({
                 return (
                   <div
                     key={clip.id}
-                    className="space-y-2.5 rounded-lg border border-[#222836] bg-[#131720] px-4 py-3"
+                    className="space-y-2.5 rounded-lg border border-[#222228] bg-[#111114] px-4 py-3"
                   >
                     <div className="flex flex-wrap items-center justify-between gap-3">
                       <div className="min-w-0 flex-1">
-                        <div className="flex items-center gap-2">
-                          <span className="truncate text-xs font-semibold text-white">
+                        <div className="flex items-center gap-2.5">
+                          <span className="truncate text-xs font-semibold text-[#F4F4F5]">
                             {clip.title}
                           </span>
-                          <select
-                            aria-label={`Approval status for ${clip.title}`}
+                          <StudioSelect
+                            ariaLabel={`Status for ${clip.title}`}
                             value={clip.status}
-                            onChange={(e) =>
-                              void onUpdateProjectStatus(
-                                clip.id,
-                                e.target.value as ClipStatus,
-                              )
+                            className="w-28"
+                            onChange={(st) =>
+                              void onUpdateProjectStatus(clip.id, st as ClipStatus)
                             }
-                            className="rounded border border-[#222836] bg-[#0B0D12] px-1.5 py-0.5 text-[10px] font-semibold uppercase text-[#CBD5E1]"
-                          >
-                            <option value="draft">Draft</option>
-                            <option value="approved">Approved</option>
-                            <option value="exported">Exported</option>
-                            <option value="posted">Posted</option>
-                            <option value="archived">Archived</option>
-                          </select>
+                            options={[
+                              { value: "draft", label: "Draft" },
+                              { value: "approved", label: "Approved" },
+                              { value: "exported", label: "Exported" },
+                              { value: "posted", label: "Posted" },
+                              { value: "archived", label: "Archived" },
+                            ]}
+                          />
                         </div>
-                        <div className="tabular-tc mt-0.5 text-[11px] text-[#94A3B8]">
-                          {formatTimecodeMs(clip.totalDurationMs)} · {clip.wordCount} words · Score{" "}
+                        <div className="tabular-tc mt-1 text-[11px] text-[#71717A]">
+                          {formatTimecodeMs(clip.totalDurationMs)} · {clip.wordCount} words · SCORE{" "}
                           {clip.score}
                         </div>
                       </div>
@@ -165,21 +166,21 @@ export function ExportsPage({
                         <button
                           type="button"
                           onClick={() => onOpenProject(clip.id)}
-                          className="inline-flex items-center gap-1 rounded border border-[#222836] px-2.5 py-1 text-xs text-[#CBD5E1] hover:border-[#2E374A] hover:text-white"
+                          className="inline-flex items-center gap-1 rounded border border-[#282830] bg-[#18181C] px-2.5 py-1 text-xs text-[#D4D4D8] hover:border-[#3A3A44] hover:text-white"
                         >
-                          <Clapperboard className="h-3.5 w-3.5" />
-                          Edit
+                          <Scissors className="h-3.5 w-3.5" />
+                          Cut Room
                         </button>
                         <button
                           type="button"
                           disabled={copyBusyId === clip.id}
                           onClick={() => void handleGenerateCopy(clip.id)}
-                          className="inline-flex items-center gap-1 rounded border border-[#F59E0B]/40 bg-[#F59E0B]/10 px-2.5 py-1 text-xs font-medium text-[#FDE68A] hover:bg-[#F59E0B]/20 disabled:opacity-45"
+                          className="inline-flex items-center gap-1 rounded border border-[#282830] bg-[#18181C] px-2.5 py-1 text-xs font-medium text-[#D4D4D8] hover:border-[#F59E0B]/50 hover:text-white disabled:opacity-40"
                         >
                           {copyBusyId === clip.id ? (
-                            <Loader2 className="h-3.5 w-3.5 animate-spin" />
+                            <CircleNotch className="h-3.5 w-3.5 animate-spin" />
                           ) : (
-                            <Sparkles className="h-3.5 w-3.5" />
+                            <NotePencil className="h-3.5 w-3.5 text-[#F59E0B]" />
                           )}
                           Post Copy
                         </button>
@@ -187,12 +188,12 @@ export function ExportsPage({
                           type="button"
                           disabled={anyBusy}
                           onClick={() => void triggerExport(clip.id, "draft")}
-                          className="inline-flex items-center gap-1 rounded border border-[#38BDF8]/40 bg-[#38BDF8]/10 px-2.5 py-1 text-xs font-medium text-[#E0F2FE] hover:bg-[#38BDF8]/20 disabled:opacity-45"
+                          className="inline-flex items-center gap-1 rounded border border-[#2C2C35] bg-[#18181C] px-2.5 py-1 text-xs font-medium text-[#F4F4F5] hover:border-[#3F3F4C] disabled:opacity-40"
                         >
                           {isDraftBusy ? (
-                            <Loader2 className="h-3.5 w-3.5 animate-spin" />
+                            <CircleNotch className="h-3.5 w-3.5 animate-spin" />
                           ) : (
-                            <Zap className="h-3.5 w-3.5" />
+                            <Lightning className="h-3.5 w-3.5 text-[#A1A1AA]" />
                           )}
                           Draft
                         </button>
@@ -200,33 +201,32 @@ export function ExportsPage({
                           type="button"
                           disabled={anyBusy}
                           onClick={() => void triggerExport(clip.id, "final")}
-                          className="inline-flex items-center gap-1 rounded bg-[#6366F1] px-2.5 py-1 text-xs font-medium text-white hover:bg-[#5558E6] disabled:opacity-45"
+                          className="inline-flex items-center gap-1 rounded bg-[#F59E0B] px-3 py-1 text-xs font-semibold text-[#09090B] hover:bg-[#FBBF24] disabled:opacity-40"
                         >
                           {isFinalBusy ? (
-                            <Loader2 className="h-3.5 w-3.5 animate-spin" />
+                            <CircleNotch className="h-3.5 w-3.5 animate-spin" />
                           ) : (
-                            <Rocket className="h-3.5 w-3.5" />
+                            <Export weight="bold" className="h-3.5 w-3.5" />
                           )}
-                          Export Final
+                          Render Master
                         </button>
                       </div>
                     </div>
 
-                    {/* Generated Viral Post Copy Card */}
                     {postCopy && (
-                      <div className="space-y-2 rounded-lg border border-[#F59E0B]/30 bg-[#0B0D12] p-3 text-xs">
+                      <div className="space-y-2 rounded-md border border-[#27272F] bg-[#09090B] p-3 text-xs">
                         <div className="flex items-center justify-between">
-                          <span className="text-[11px] font-semibold uppercase tracking-wider text-[#F59E0B]">
-                            Viral Post Copy ({postCopy.provider})
+                          <span className="tabular-tc text-[10px] font-semibold uppercase tracking-wider text-[#F59E0B]">
+                            DISTRIBUTION COPY · {postCopy.provider}
                           </span>
                           <div className="flex items-center gap-1.5">
                             <button
                               type="button"
                               onClick={() => copyText(`${clip.id}:title`, postCopy.title)}
-                              className="inline-flex items-center gap-1 rounded border border-[#222836] px-2 py-0.5 text-[10px] text-[#CBD5E1] hover:text-white"
+                              className="inline-flex items-center gap-1 rounded border border-[#222228] px-2 py-0.5 text-[10px] text-[#D4D4D8] hover:text-white"
                             >
                               {copiedKey === `${clip.id}:title` ? (
-                                <Check className="h-3 w-3 text-[#10B981]" />
+                                <Check className="h-3 w-3 text-[#22C55E]" />
                               ) : (
                                 <Copy className="h-3 w-3" />
                               )}
@@ -237,19 +237,19 @@ export function ExportsPage({
                               onClick={() =>
                                 copyText(`${clip.id}:tags`, postCopy.hashtags.join(" "))
                               }
-                              className="inline-flex items-center gap-1 rounded border border-[#222836] px-2 py-0.5 text-[10px] text-[#CBD5E1] hover:text-white"
+                              className="inline-flex items-center gap-1 rounded border border-[#222228] px-2 py-0.5 text-[10px] text-[#D4D4D8] hover:text-white"
                             >
                               {copiedKey === `${clip.id}:tags` ? (
-                                <Check className="h-3 w-3 text-[#10B981]" />
+                                <Check className="h-3 w-3 text-[#22C55E]" />
                               ) : (
                                 <Copy className="h-3 w-3" />
                               )}
-                              Hashtags
+                              Tags
                             </button>
                             <button
                               type="button"
                               onClick={() => copyText(`${clip.id}:all`, postCopy.fullCopy)}
-                              className="inline-flex items-center gap-1 rounded bg-[#6366F1] px-2 py-0.5 text-[10px] font-medium text-white hover:bg-[#5558E6]"
+                              className="inline-flex items-center gap-1 rounded bg-[#F59E0B] px-2 py-0.5 text-[10px] font-semibold text-[#09090B] hover:bg-[#FBBF24]"
                             >
                               {copiedKey === `${clip.id}:all` ? (
                                 <Check className="h-3 w-3" />
@@ -260,9 +260,9 @@ export function ExportsPage({
                             </button>
                           </div>
                         </div>
-                        <div className="font-semibold text-white">{postCopy.title}</div>
-                        <p className="text-[11px] text-[#94A3B8]">{postCopy.description}</p>
-                        <div className="flex flex-wrap gap-1.5 text-[11px] text-[#38BDF8]">
+                        <div className="font-semibold text-[#F4F4F5]">{postCopy.title}</div>
+                        <p className="text-[11px] text-[#A1A1AA]">{postCopy.description}</p>
+                        <div className="tabular-tc flex flex-wrap gap-1.5 text-[11px] text-[#FBBF24]">
                           {postCopy.hashtags.map((tag) => (
                             <span key={tag}>{tag}</span>
                           ))}
@@ -276,18 +276,17 @@ export function ExportsPage({
           </section>
         )}
 
-        {/* Completed Exports */}
+        {/* Rendered MP4 Masters */}
         <section className="space-y-2.5">
-          <h2 className="text-xs font-semibold uppercase tracking-wider text-[#94A3B8]">
-            Completed MP4 Exports ({exportsList.length})
+          <h2 className="text-[11px] font-semibold uppercase tracking-wider text-[#71717A]">
+            Completed MP4 Renders ({exportsList.length})
           </h2>
 
           {exportsList.length === 0 ? (
-            <div className="rounded-xl border border-[#222836] bg-[#131720] p-8 text-center text-xs text-[#94A3B8]">
-              <Film className="mx-auto h-8 w-8 text-[#64748B]" />
+            <div className="rounded-lg border border-[#222228] bg-[#111114] p-8 text-center text-xs text-[#71717A]">
+              <FilmSlate className="mx-auto h-7 w-7 text-[#52525B]" />
               <p className="mt-2">
-                No MP4s rendered yet. Click Draft or Export Final above (or inside the Editor) to
-                compile an EDL to MP4.
+                No MP4 renders completed yet. Trigger Draft or Render Master above or from Cut Room.
               </p>
             </div>
           ) : (
@@ -297,21 +296,21 @@ export function ExportsPage({
                 return (
                   <div
                     key={exp.id}
-                    className="flex flex-wrap items-center justify-between gap-3 rounded-lg border border-[#222836] bg-[#131720] px-4 py-3"
+                    className="flex flex-wrap items-center justify-between gap-3 rounded-lg border border-[#222228] bg-[#111114] px-4 py-3"
                   >
                     <div className="min-w-0 flex-1">
                       <div className="flex items-center gap-2">
-                        <span className="truncate text-xs font-semibold text-white">
+                        <span className="truncate text-xs font-semibold text-[#F4F4F5]">
                           {exp.title}
                         </span>
-                        <span className="rounded bg-[#1A202C] px-1.5 py-0.5 text-[10px] font-medium text-[#38BDF8]">
+                        <span className="tabular-tc rounded border border-[#282830] bg-[#18181C] px-1.5 py-0.5 text-[10px] font-medium text-[#D4D4D8]">
                           {exp.ratio} · {exp.quality}
                         </span>
-                        <span className="rounded bg-[#10B981]/15 px-1.5 py-0.5 text-[10px] font-medium uppercase text-[#10B981]">
+                        <span className="tabular-tc rounded border border-[#22C55E]/30 bg-[#22C55E]/10 px-1.5 py-0.5 text-[10px] font-medium uppercase text-[#4ADE80]">
                           {exp.speedPreset}
                         </span>
                       </div>
-                      <div className="tabular-tc mt-1 text-[11px] text-[#94A3B8]">
+                      <div className="tabular-tc mt-1 text-[11px] text-[#71717A]">
                         {formatTimecodeMs(exp.durationMs)} · {formatBytes(exp.sizeBytes)}
                         {exp.encoder ? ` · ${exp.encoder}` : ""}
                       </div>
@@ -322,23 +321,23 @@ export function ExportsPage({
                         <a
                           href={dlUrl}
                           download
-                          className="inline-flex items-center gap-1 rounded bg-[#10B981] px-3 py-1.5 text-xs font-semibold text-[#042F2E] hover:bg-[#34D399]"
+                          className="inline-flex items-center gap-1 rounded bg-[#F59E0B] px-3 py-1.5 text-xs font-semibold text-[#09090B] hover:bg-[#FBBF24]"
                         >
-                          <Download className="h-3.5 w-3.5" />
+                          <DownloadSimple weight="bold" className="h-3.5 w-3.5" />
                           Download MP4
                         </a>
                       ) : (
-                        <span className="rounded border border-[#222836] px-2.5 py-1 text-[11px] text-[#64748B]">
-                          Demo Export
+                        <span className="rounded border border-[#222228] px-2.5 py-1 text-[11px] text-[#71717A]">
+                          Demo Render
                         </span>
                       )}
                       <button
                         type="button"
                         onClick={() => void handleDelete(exp.id)}
                         aria-label={`Delete export ${exp.title}`}
-                        className="rounded border border-[#222836] p-1.5 text-[#94A3B8] hover:border-[#F43F5E]/40 hover:text-[#F43F5E]"
+                        className="rounded border border-[#222228] p-1.5 text-[#A1A1AA] hover:border-[#EF4444]/40 hover:text-[#EF4444]"
                       >
-                        <Trash2 className="h-3.5 w-3.5" />
+                        <Trash className="h-3.5 w-3.5" />
                       </button>
                     </div>
                   </div>

@@ -15,6 +15,14 @@ from sqlalchemy import desc, select
 
 from .. import __version__, cli, config, paths
 from ..ai import generate_post_copy, run_coeditor
+from ..audio import (
+    AUDIO_EXTENSIONS,
+    BgmAsset,
+    delete_bgm_asset,
+    list_bgm_assets,
+    resolve_bgm_asset_path,
+    save_uploaded_bgm,
+)
 from ..db import ClipProjectRow, ExportRow, FeedItemRow, JobRow, SourceRow, get_session
 from ..db.models import new_id, utcnow_iso
 from ..edl import (
@@ -25,7 +33,15 @@ from ..edl import (
     apply_edl_patch,
     auto_tighten_silence,
 )
-from ..ingest import VIDEO_EXTENSIONS, InboxWatcher, poll_all_feeds
+from ..ingest import (
+    VIDEO_EXTENSIONS,
+    DownloadError,
+    InboxWatcher,
+    UnsupportedSiteError,
+    detect_url_platform,
+    poll_all_feeds,
+    probe_url_metadata,
+)
 from ..render import RenderError
 from ..security import (
     PathSandboxError,
@@ -41,6 +57,7 @@ from ..workspace import exports as export_store
 from ..workspace import profiles as profile_store
 from ..workspace.archive import archive_source_vod, storage_summary
 from ..workspace.jobs import job_manager
+from ..workspace.mashup import create_mashup_project
 from ..workspace.profiles import CreatorProfile
 
 router = APIRouter(prefix="/api/v1", tags=["v1"])
@@ -62,20 +79,37 @@ class ProfileCreateIn(BaseModel):
     name: str = Field(min_length=1, max_length=120)
     creator_name: str = ""
     brief: str = ""
+    content_mode: str = "stream"
+    preferred_lang: str = "en"
     min_duration_s: float = Field(default=15.0, gt=0)
-    max_duration_s: float = Field(default=50.0, gt=0)
+    max_duration_s: float = Field(default=50.0, gt=0, le=300.0)
     max_clips: int = Field(default=8, ge=1, le=50)
+    default_ratio: str = "9:16"
     layout_mode: str = "auto_split"
+    fit_backdrop: str = "blur"
     split_ratio: float = Field(default=0.35, ge=0.20, le=0.65)
+    border_style: str = "none"
+    cinema_grade: str = "off"
     title_card_style: str = "seam_card_white"
     cold_open_enabled: bool = True
     cold_open_duration_ms: int = Field(default=1500, ge=500, le=4000)
     cta_mode: str = "off"
     cta_text: str = ""
+    watermark_text: str = ""
+    watermark_opacity: float = Field(default=0.78, ge=0.10, le=1.0)
+    show_cinema_credit: bool = False
+    transition_style: str = "none"
+    transition_sfx: str = "none"
+    bgm_mode: str = "off"
+    bgm_mood: str = "any"
+    bgm_asset_id: str = ""
+    dialogue_enhance: bool = False
+    auto_tighten_silence: bool = False
     reveal_mode: str = "progressive"
     caption_style: str = "bold_pop"
     burn_captions: bool = True
     censor_profanity: bool = True
+    margin_v_ratio: float = Field(default=0.22, ge=0.05, le=0.85)
     editor_boundaries: str = ""
     channel_urls: list[str] = Field(default_factory=list)
     keyword_filters: list[str] = Field(default_factory=list)
@@ -83,11 +117,17 @@ class ProfileCreateIn(BaseModel):
     auto_export: bool = False
 
 
+class UrlProbeIn(BaseModel):
+    url: str = Field(min_length=1)
+
+
 class UrlSourceIn(BaseModel):
     url: str = Field(min_length=1)
     profile_id: str | None = Field(default=None, alias="profileId")
     title: str = ""
     auto_clip: bool = Field(default=True, alias="autoClip")
+    start_sec: float | None = Field(default=None, alias="startSec", ge=0.0)
+    end_sec: float | None = Field(default=None, alias="endSec", gt=0.0)
 
     model_config = {"populate_by_name": True}
 
@@ -148,6 +188,20 @@ class ExportRequestIn(BaseModel):
     model_config = {"populate_by_name": True}
 
 
+class MashupCreateIn(BaseModel):
+    project_ids: list[str] = Field(alias="projectIds", min_length=2, max_length=12)
+    title: str = "Theme Mashup"
+    pov_hook: str = Field(default="", alias="povHook")
+    profile_id: str | None = Field(default=None, alias="profileId")
+    transition_style: str = Field(default="flash_white", alias="transitionStyle")
+    transition_sfx: str = Field(default="whoosh_flash", alias="transitionSfx")
+    max_slice_duration_ms: int = Field(
+        default=35_000, alias="maxSliceDurationMs", ge=2000, le=120_000
+    )
+
+    model_config = {"populate_by_name": True}
+
+
 class SecretIn(BaseModel):
     key: str
     value: str = Field(min_length=1)
@@ -180,6 +234,7 @@ def _job_dict(row: JobRow, *, source_title: str = "", clip_count: int = 0) -> di
         "stage": row.stage,
         "progress": row.progress,
         "error": row.error,
+        "downloadDetail": settings.get("downloadDetail"),
         "clipCount": clip_count,
         "hypeCurve": settings.get("hypeCurve", []),
         "createdAt": row.created_at,
@@ -191,8 +246,9 @@ def _project_summary(row: ClipProjectRow) -> dict[str, Any]:
     edl = TimelineProject.model_validate(row.edl_json)
     proxy_ok = bool(row.proxy_path and Path(row.proxy_path).is_file())
     peaks_ok = bool(row.peaks_path and Path(row.peaks_path).is_file())
-    thumb_path = Path(row.proxy_path).parent / "thumb.jpg" if row.proxy_path else None
-    thumb_ok = bool(thumb_path and thumb_path.is_file())
+    clip_dir = Path(row.proxy_path).parent if row.proxy_path else None
+    thumb_ok = bool(clip_dir and (clip_dir / "thumb.jpg").is_file())
+    filmstrip_ok = bool(clip_dir and (clip_dir / "filmstrip.jpg").is_file())
     return {
         "id": row.id,
         "jobId": row.job_id,
@@ -207,6 +263,7 @@ def _project_summary(row: ClipProjectRow) -> dict[str, Any]:
         "hasSlice": proxy_ok,
         "hasPeaks": peaks_ok,
         "hasThumb": thumb_ok,
+        "hasFilmstrip": filmstrip_ok,
         "createdAt": row.created_at,
         "updatedAt": row.updated_at,
     }
@@ -312,6 +369,7 @@ def list_sources() -> list[dict[str, Any]]:
 @router.post("/sources/upload", status_code=201)
 async def upload_source(
     file: UploadFile = File(...),
+    subtitle_file: UploadFile | None = File(default=None),
     profile_id: str | None = Form(default=None),
     auto_clip: bool = Form(default=True),
 ) -> dict[str, Any]:
@@ -339,8 +397,30 @@ async def upload_source(
         dest.unlink(missing_ok=True)
         raise HTTPException(status_code=400, detail="Uploaded file is empty.")
 
+    sidecar_path_str: str | None = None
+    if subtitle_file is not None and subtitle_file.filename:
+        sub_ext = Path(subtitle_file.filename).suffix.lower() or ".srt"
+        if sub_ext not in (".srt", ".vtt", ".ass"):
+            await subtitle_file.close()
+            raise HTTPException(
+                status_code=400, detail="Subtitle file must be .srt, .vtt, or .ass."
+            )
+        sub_dir = safe_resolve(paths.work_dir() / source_id, paths.work_dir())
+        sub_dir.mkdir(parents=True, exist_ok=True)
+        sub_dest = safe_resolve(sub_dir / f"sidecar{sub_ext}", paths.work_dir())
+        try:
+            sub_bytes = await subtitle_file.read(8 * 1024 * 1024)
+            if sub_bytes:
+                sub_dest.write_bytes(sub_bytes)
+                sidecar_path_str = str(sub_dest)
+        finally:
+            await subtitle_file.close()
+
     title = Path(raw_name).stem[:255] or source_id
     job_payload: dict[str, Any] | None = None
+    job_settings: dict[str, Any] = {"trigger": "upload", "originalFilename": raw_name}
+    if sidecar_path_str:
+        job_settings["sidecarSubPath"] = sidecar_path_str
 
     with get_session() as session:
         src = SourceRow(
@@ -362,7 +442,7 @@ async def upload_source(
                 status="queued",
                 stage="queued",
                 progress=0.0,
-                settings_json={"trigger": "upload", "originalFilename": raw_name},
+                settings_json=job_settings,
             )
             session.add(job)
             session.flush()
@@ -374,17 +454,57 @@ async def upload_source(
     return {"source": src_out, "job": job_payload}
 
 
+@router.post("/sources/probe-url")
+async def probe_source_url(payload: UrlProbeIn) -> dict[str, Any]:
+    cfg = config.load()
+    try:
+        return await asyncio.to_thread(
+            probe_url_metadata,
+            payload.url,
+            cookies_browser=cfg.ingest.cookies_browser,
+        )
+    except SSRFError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except UnsupportedSiteError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+    except DownloadError as exc:
+        raise HTTPException(status_code=502, detail=str(exc)) from exc
+
+
 @router.post("/sources/url", status_code=202)
 def ingest_url_source(payload: UrlSourceIn) -> dict[str, Any]:
     try:
         safe_url = validate_public_url(payload.url)
+        platform = detect_url_platform(safe_url)
     except SSRFError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except UnsupportedSiteError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+
+    if (
+        payload.start_sec is not None
+        and payload.end_sec is not None
+        and payload.end_sec <= payload.start_sec
+    ):
+        raise HTTPException(
+            status_code=400,
+            detail="endSec must be greater than startSec when specifying a VOD time window.",
+        )
 
     chosen_profile_id = _resolve_profile_id(payload.profile_id)
     source_id = new_id("src")
     title = payload.title.strip()[:255] or safe_url[:140]
     job_payload: dict[str, Any] | None = None
+
+    job_settings: dict[str, Any] = {
+        "trigger": "url",
+        "url": safe_url,
+        "platform": platform,
+    }
+    if payload.start_sec is not None:
+        job_settings["startSec"] = round(float(payload.start_sec), 2)
+    if payload.end_sec is not None:
+        job_settings["endSec"] = round(float(payload.end_sec), 2)
 
     with get_session() as session:
         src = SourceRow(
@@ -406,7 +526,7 @@ def ingest_url_source(payload: UrlSourceIn) -> dict[str, Any]:
                 status="queued",
                 stage="download",
                 progress=0.0,
-                settings_json={"trigger": "url", "url": safe_url},
+                settings_json=job_settings,
             )
             session.add(job)
             session.flush()
@@ -554,6 +674,28 @@ def list_projects(
         return [_project_summary(r) for r in rows]
 
 
+@router.post("/projects/mashup", status_code=201)
+def build_theme_mashup(payload: MashupCreateIn) -> dict[str, Any]:
+    if payload.transition_style not in ("none", "flash_white", "dip_black", "dissolve"):
+        raise HTTPException(status_code=400, detail="Unsupported transitionStyle.")
+    if payload.transition_sfx not in ("none", "whoosh_flash", "cinema_hit"):
+        raise HTTPException(status_code=400, detail="Unsupported transitionSfx.")
+    try:
+        return create_mashup_project(
+            payload.project_ids,
+            title=payload.title,
+            pov_hook=payload.pov_hook,
+            profile_id=payload.profile_id,
+            transition_style=payload.transition_style,  # type: ignore[arg-type]
+            transition_sfx=payload.transition_sfx,  # type: ignore[arg-type]
+            max_slice_duration_ms=payload.max_slice_duration_ms,
+        )
+    except KeyError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
 @router.get("/projects/{project_id}/timeline")
 def get_project_timeline(project_id: str) -> dict[str, Any]:
     with get_session() as session:
@@ -626,6 +768,22 @@ def get_project_thumb(project_id: str) -> FileResponse:
         raise HTTPException(status_code=403, detail=str(exc)) from exc
     if not safe.is_file():
         raise HTTPException(status_code=404, detail="Thumbnail image missing on disk.")
+    return FileResponse(safe, media_type="image/jpeg")
+
+
+@router.get("/projects/{project_id}/filmstrip")
+def get_project_filmstrip(project_id: str) -> FileResponse:
+    with get_session() as session:
+        row = session.get(ClipProjectRow, project_id)
+        if row is None or not row.proxy_path:
+            raise HTTPException(status_code=404, detail="Clip filmstrip not found.")
+        candidate = Path(row.proxy_path).parent / "filmstrip.jpg"
+    try:
+        safe = safe_resolve(candidate, paths.work_dir())
+    except PathSandboxError as exc:
+        raise HTTPException(status_code=403, detail=str(exc)) from exc
+    if not safe.is_file():
+        raise HTTPException(status_code=404, detail="Filmstrip image missing on disk.")
     return FileResponse(safe, media_type="image/jpeg")
 
 
@@ -954,6 +1112,81 @@ def dismiss_feed_item(feed_id: str) -> dict[str, str]:
 
 
 # -- Settings & Write-Only Secrets -----------------------------------------
+
+
+def _bgm_dict(asset: BgmAsset) -> dict[str, Any]:
+    return {
+        "id": asset.id,
+        "name": asset.name,
+        "filename": asset.filename,
+        "mood": asset.mood,
+        "durationMs": asset.duration_ms,
+        "sizeBytes": asset.size_bytes,
+        "dropOffsetMs": asset.drop_offset_ms,
+        "builtin": asset.builtin,
+    }
+
+
+@router.get("/bgm")
+def get_bgm_library() -> list[dict[str, Any]]:
+    return [_bgm_dict(a) for a in list_bgm_assets()]
+
+
+@router.post("/bgm/upload", status_code=201)
+async def upload_bgm_track(
+    file: UploadFile = File(...),
+    name: str = Form(default=""),
+    mood: str = Form(default="any"),
+) -> dict[str, Any]:
+    raw_name = Path(file.filename or "bgm.mp3").name
+    ext = Path(raw_name).suffix.lower() or ".mp3"
+    if ext not in AUDIO_EXTENSIONS:
+        allowed = ", ".join(sorted(AUDIO_EXTENSIONS))
+        await file.close()
+        raise HTTPException(
+            status_code=400, detail=f"Unsupported audio type {ext}; use {allowed}."
+        )
+    try:
+        payload = await file.read(64 * 1024 * 1024 + 1)
+    finally:
+        await file.close()
+
+    if not payload:
+        raise HTTPException(status_code=400, detail="Uploaded BGM file is empty.")
+    if len(payload) > 64 * 1024 * 1024:
+        raise HTTPException(status_code=413, detail="BGM audio file exceeds 64 MB limit.")
+
+    try:
+        saved = await asyncio.to_thread(
+            save_uploaded_bgm,
+            raw_name,
+            payload,
+            name=name,
+            mood=mood,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    return _bgm_dict(saved)
+
+
+@router.get("/bgm/{asset_id}/media")
+def stream_bgm_media(asset_id: str) -> FileResponse:
+    resolved = resolve_bgm_asset_path(asset_id)
+    if resolved is None:
+        raise HTTPException(status_code=404, detail="BGM asset not found.")
+    audio_path, mime = resolved
+    return FileResponse(audio_path, media_type=mime, filename=audio_path.name)
+
+
+@router.delete("/bgm/{asset_id}", status_code=204)
+def remove_bgm_track(asset_id: str) -> None:
+    existing = next((a for a in list_bgm_assets() if a.id == asset_id), None)
+    if existing is None:
+        raise HTTPException(status_code=404, detail="BGM asset not found.")
+    if existing.builtin:
+        raise HTTPException(status_code=400, detail="Built-in starter BGM beds cannot be deleted.")
+    if not delete_bgm_asset(asset_id):
+        raise HTTPException(status_code=404, detail="BGM asset not found.")
 
 
 @router.get("/settings")

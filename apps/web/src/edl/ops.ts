@@ -146,8 +146,7 @@ export function applyBladeCut(
       const leftDur = cStart - sT0;
       if (leftDur >= MIN_SLICE_MS) {
         newClips.push({
-          id: clip.id,
-          sourceStartMs: clip.sourceStartMs,
+          ...clip,
           sourceEndMs: clip.sourceStartMs + leftDur,
         });
       }
@@ -158,9 +157,12 @@ export function applyBladeCut(
       const rightDur = sT1 - cEnd;
       if (rightDur >= MIN_SLICE_MS) {
         newClips.push({
+          ...clip,
           id: nextId(clip.id),
           sourceStartMs: clip.sourceStartMs + rightOffset,
           sourceEndMs: clip.sourceEndMs,
+          transitionIn: "none",
+          transitionSfx: "none",
         });
       }
     }

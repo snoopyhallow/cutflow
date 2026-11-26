@@ -52,8 +52,15 @@ class StorageSettings(BaseModel):
     hardlink_inbox_drops: bool = True
 
 
+class IngestSettings(BaseModel):
+    cookies_browser: Literal["none", "chrome", "edge", "firefox", "brave"] = "none"
+    concurrent_fragments: int = Field(default=8, ge=1, le=16)
+    preferred_audio_lang: str = "en"
+    preferred_subtitle_lang: str = "en"
+
+
 class ExportDefaults(BaseModel):
-    ratio: Literal["9:16", "1:1", "16:9"] = "9:16"
+    ratio: Literal["9:16", "4:5", "1:1", "16:9"] = "9:16"
     quality: Literal["720p", "1080p", "1440p", "4k"] = "1080p"
     speed_preset: Literal["draft", "final"] = "final"
     loudness_lufs: float = -14.0
@@ -67,6 +74,7 @@ class Settings(BaseModel):
     models: ModelRoutingSettings = Field(default_factory=ModelRoutingSettings)
     alignment: AlignmentSettings = Field(default_factory=AlignmentSettings)
     storage: StorageSettings = Field(default_factory=StorageSettings)
+    ingest: IngestSettings = Field(default_factory=IngestSettings)
     export: ExportDefaults = Field(default_factory=ExportDefaults)
 
     model_config = {"extra": "ignore"}

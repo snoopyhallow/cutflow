@@ -11,6 +11,7 @@ import {
   type TimelineProject,
 } from "../edl";
 import type {
+  BgmAssetItem,
   ClipProjectSummary,
   ClipStatus,
   CoEditorRequest,
@@ -24,6 +25,8 @@ import type {
   IngestResult,
   JobProgressEvent,
   JobSummary,
+  MashupCreateInput,
+  MashupCreateResponse,
   PostCopyResponse,
   ProfileCreateInput,
   ProjectPeaks,
@@ -32,6 +35,8 @@ import type {
   StorageSummary,
   StudioTransport,
   TimelineResponse,
+  UrlIngestOptions,
+  UrlProbeResponse,
 } from "./types";
 
 const DEMO_HYPE = [
@@ -40,23 +45,129 @@ const DEMO_HYPE = [
   { startS: 20, endS: 30, score: 0.91 },
   { startS: 30, endS: 40, score: 0.58 },
   { startS: 40, endS: 50, score: 0.34 },
-  { startS: 50, endS: 60, score: 0.77 },
+  { startS: 50, endS: 60, score: 0.84 },
+];
+
+const BLOCKED_HOSTS = [
+  "kisskh.",
+  "fmovies",
+  "123movies",
+  "soap2day",
+  "hianime",
+  "9anime",
+  "gogoanime",
+  "netflix.com",
+  "disneyplus.com",
 ];
 
 export class DemoTransport implements StudioTransport {
   readonly mode = "demo" as const;
   private readonly profiles: CreatorProfile[] = [
     {
+      id: "cinema-tv-edits",
+      name: "Cinema & TV Edits (JJ_EDIT Style)",
+      creator_name: "Cinema Studio",
+      brief:
+        "Dramatic movie & prestige TV dialogue climaxes, cold realizations, and razor-sharp tension.",
+      content_mode: "cinema",
+      preferred_lang: "en",
+      min_duration_s: 18,
+      max_duration_s: 65,
+      max_clips: 6,
+      default_ratio: "1:1",
+      layout_mode: "auto_reframe",
+      fit_backdrop: "black",
+      split_ratio: 0.35,
+      border_style: "thin_rounded",
+      cinema_grade: "crisp_hd",
+      title_card_style: "pov_top_bar",
+      cold_open_enabled: false,
+      cold_open_duration_ms: 1500,
+      cta_mode: "off",
+      cta_text: "",
+      watermark_text: "CUTFLOW",
+      watermark_opacity: 0.78,
+      show_cinema_credit: true,
+      transition_style: "dip_black",
+      transition_sfx: "cinema_hit",
+      bgm_mode: "auto_mood",
+      bgm_mood: "dark_cinema",
+      bgm_asset_id: "dark_cinema_pulse",
+      dialogue_enhance: true,
+      auto_tighten_silence: false,
+      reveal_mode: "group",
+      caption_style: "cinema_neon_glow",
+      burn_captions: true,
+      censor_profanity: false,
+      margin_v_ratio: 0.4,
+      editor_boundaries: "Preserve dramatic pauses; never cut mid-sentence.",
+      channel_urls: [],
+      keyword_filters: [],
+      auto_queue_feed: false,
+      auto_export: false,
+      inbox_path: "~/.cutflow/inbox/cinema-tv-edits",
+    },
+    {
+      id: "viral-gaming-challenge",
+      name: "Viral Gaming Challenge (MrBeast Style)",
+      creator_name: "Challenge Crew",
+      brief:
+        "High-stakes gaming challenges, money/score reveals, flash transitions, and punch-word glow.",
+      content_mode: "stream",
+      preferred_lang: "en",
+      min_duration_s: 15,
+      max_duration_s: 55,
+      max_clips: 8,
+      default_ratio: "9:16",
+      layout_mode: "auto_reframe",
+      fit_backdrop: "blur",
+      split_ratio: 0.35,
+      border_style: "none",
+      cinema_grade: "crisp_hd",
+      title_card_style: "off",
+      cold_open_enabled: true,
+      cold_open_duration_ms: 1400,
+      cta_mode: "off",
+      cta_text: "",
+      watermark_text: "",
+      watermark_opacity: 0.78,
+      show_cinema_credit: false,
+      transition_style: "flash_white",
+      transition_sfx: "whoosh_flash",
+      bgm_mode: "auto_mood",
+      bgm_mood: "upbeat_gaming",
+      bgm_asset_id: "upbeat_challenge_drive",
+      dialogue_enhance: true,
+      auto_tighten_silence: true,
+      reveal_mode: "progressive",
+      caption_style: "viral_punch_glow",
+      burn_captions: true,
+      censor_profanity: true,
+      margin_v_ratio: 0.38,
+      editor_boundaries: "Tighten dead air aggressively; highlight numbers and stakes.",
+      channel_urls: [],
+      keyword_filters: [],
+      auto_queue_feed: false,
+      auto_export: false,
+      inbox_path: "~/.cutflow/inbox/viral-gaming-challenge",
+    },
+    {
       id: "general-gaming-streamer",
       name: "General Gaming Streamer",
       creator_name: "Demo Streamer",
       brief:
         "High-energy gaming reactions, funny fails, clutch plays, and chaotic banter.",
+      content_mode: "stream",
+      preferred_lang: "en",
       min_duration_s: 15,
       max_duration_s: 50,
       max_clips: 8,
+      default_ratio: "9:16",
       layout_mode: "auto_split",
+      fit_backdrop: "blur",
       split_ratio: 0.35,
+      border_style: "none",
+      cinema_grade: "off",
       title_card_style: "seam_card_white",
       cold_open_enabled: true,
       cold_open_duration_ms: 1500,
@@ -66,12 +177,13 @@ export class DemoTransport implements StudioTransport {
       caption_style: "bold_pop",
       burn_captions: true,
       censor_profanity: true,
+      margin_v_ratio: 0.22,
       editor_boundaries: "Skip loading screens and donation reads unless punchline.",
       channel_urls: [],
       keyword_filters: [],
       auto_queue_feed: false,
       auto_export: false,
-      inbox_path: "~/clip-farming/inbox/general-gaming-streamer",
+      inbox_path: "~/.cutflow/inbox/general-gaming-streamer",
     },
   ];
   private readonly sources: SourceSummary[] = [
@@ -79,8 +191,8 @@ export class DemoTransport implements StudioTransport {
       id: "src_demo_001",
       sourceType: "upload",
       url: null,
-      title: "GTA 6 Stream Highlights (Demo VOD)",
-      channel: "Demo Streamer",
+      title: "GTA VI Stream & Cinema Highlights (Demo)",
+      channel: "Demo Studio",
       durationMs: 120_000,
       width: 1920,
       height: 1080,
@@ -93,27 +205,53 @@ export class DemoTransport implements StudioTransport {
     {
       id: "job_demo_001",
       sourceId: "src_demo_001",
-      sourceTitle: "GTA 6 Stream Highlights (Demo VOD)",
-      profileId: "general-gaming-streamer",
+      sourceTitle: "GTA VI Stream & Cinema Highlights (Demo)",
+      profileId: "cinema-tv-edits",
       status: "done",
       stage: "done",
       progress: 1.0,
       error: null,
-      clipCount: 1,
+      clipCount: 2,
       hypeCurve: DEMO_HYPE,
       createdAt: "2026-11-24T12:00:00Z",
       updatedAt: "2026-11-24T12:01:00Z",
+    },
+  ];
+  private readonly bgmAssets: BgmAssetItem[] = [
+    {
+      id: "dark_cinema_pulse",
+      name: "Dark Cinema Synth Pulse",
+      filename: "dark_cinema_pulse.wav",
+      mood: "dark_cinema",
+      durationMs: 16_000,
+      sizeBytes: 2_822_444,
+      dropOffsetMs: 0,
+      builtin: true,
+    },
+    {
+      id: "upbeat_challenge_drive",
+      name: "Upbeat Challenge Drive",
+      filename: "upbeat_challenge_drive.wav",
+      mood: "upbeat_gaming",
+      durationMs: 16_000,
+      sizeBytes: 2_822_444,
+      dropOffsetMs: 0,
+      builtin: true,
     },
   ];
   private readonly projects = new Map<string, TimelineProject>();
   private readonly exports: ExportSummary[] = [];
   private readonly feed: FeedItem[] = [];
   private demoBoundaries =
-    "Keep edits snappy; never cut punchlines; keep white rounded seam card clean.";
+    "Keep edits snappy; never cut punchlines; preserve dialogue cadence.";
   private demoModels = {
     active_provider: "gemini",
     scan_model: "gemini-2.5-flash",
     editor_model: "gemini-2.5-flash",
+  };
+  private demoIngest = {
+    cookies_browser: "none",
+    concurrent_fragments: 8,
   };
   private readonly keysPresent: Record<string, boolean> = {
     gemini: false,
@@ -124,17 +262,134 @@ export class DemoTransport implements StudioTransport {
   };
 
   constructor() {
-    const parsed = TimelineProjectSchema.parse(sampleEdlFixture);
-    this.projects.set(parsed.projectId, parsed);
+    const base = TimelineProjectSchema.parse(sampleEdlFixture);
+    // Seed Demo Clip 1: 1:1 Cinema Neon Glow Edit (JJ_EDIT style)
+    const cinemaClip: TimelineProject = {
+      ...cloneEdl(base),
+      projectId: "clip_demo_cinema",
+      profileId: "cinema-tv-edits",
+      title: "When Reality Hits — Cinema Square Edit",
+      output: {
+        ...base.output,
+        ratio: "1:1",
+        borderStyle: "thin_rounded",
+        cinemaGrade: "crisp_hd",
+      },
+      tracks: {
+        video: {
+          coldOpen: null,
+          clips: [
+            {
+              id: "v1",
+              sourceStartMs: 10_000,
+              sourceEndMs: 16_000,
+              label: "Scene 1 · Opening",
+            },
+            {
+              id: "v2",
+              sourceStartMs: 18_500,
+              sourceEndMs: 25_000,
+              label: "Scene 2 · Realization",
+              transitionIn: "flash_white",
+              transitionDurationMs: 240,
+              transitionSfx: "whoosh_flash",
+            },
+          ],
+          framing: [
+            {
+              id: "f1",
+              timelineStartMs: 0,
+              timelineEndMs: 12_500,
+              mode: "crop",
+              splitRatio: 0.35,
+              camBox: null,
+              gameBox: null,
+              fitBackdrop: "black",
+              panX: 0.48,
+              panY: 0.42,
+              zoom: 1.14,
+            },
+          ],
+        },
+        audio: {
+          gainDb: 0,
+          normalizeLufs: -14,
+          dialogueEnhance: true,
+          muteOriginal: false,
+          bgm: {
+            assetId: "dark_cinema_pulse",
+            gainDb: -15.5,
+            duckingEnabled: true,
+            startOffsetMs: 0,
+            fadeInMs: 500,
+            fadeOutMs: 1000,
+          },
+        },
+        subtitles: {
+          enabled: true,
+          style: {
+            preset: "cinema_neon_glow",
+            revealMode: "group",
+            font: "Montserrat-ExtraBold",
+            fontSizeScale: 1.0,
+            primaryColor: "#FFFFFF",
+            accentColor: "#4F7CFF",
+            outlineColor: "#000000",
+            letterSpacing: 3.5,
+            colorPalette: ["#4F7CFF", "#4ADE80", "#FBBF24", "#F472B6"],
+          },
+          censorProfanity: false,
+          marginVRatio: 0.38,
+          muteRanges: [],
+          words: [
+            { id: "cw1", text: "Every", startMs: 600, endMs: 1100, speaker: "S1" },
+            { id: "cw2", text: "choice", startMs: 1100, endMs: 1650, speaker: "S1" },
+            { id: "cw3", text: "leaves", startMs: 1650, endMs: 2200, speaker: "S1" },
+            { id: "cw4", text: "a", startMs: 2600, endMs: 2850, speaker: "S1" },
+            { id: "cw5", text: "permanent", startMs: 2850, endMs: 3600, speaker: "S1" },
+            { id: "cw6", text: "mark.", startMs: 3600, endMs: 4300, speaker: "S1" },
+            { id: "cw7", text: "Nothing", startMs: 6400, endMs: 7100, speaker: "S1" },
+            { id: "cw8", text: "stays", startMs: 7100, endMs: 7700, speaker: "S1" },
+            { id: "cw9", text: "hidden.", startMs: 7700, endMs: 8600, speaker: "S1" },
+          ],
+        },
+        overlays: [
+          {
+            id: "ov_pov",
+            kind: "pov_top_bar",
+            text: "POV: WHEN THE SCENE CHANGES EVERYTHING",
+            startMs: 0,
+            endMs: 3600,
+            yAnchor: "top",
+            yOffsetRatio: 0,
+            maxLines: 2,
+          },
+          {
+            id: "ov_wm",
+            kind: "watermark_tag",
+            text: "CUTFLOW",
+            startMs: 0,
+            endMs: 12_500,
+            yAnchor: "bottom",
+            yOffsetRatio: 0.06,
+            xOffsetRatio: 0,
+            opacity: 0.78,
+            maxLines: 1,
+          },
+        ],
+      },
+    };
+    this.projects.set(cinemaClip.projectId, cinemaClip);
+    this.projects.set(base.projectId, base);
   }
 
   async health(): Promise<HealthResponse> {
     return {
       status: "ok",
       service: "cutflow-demo",
-      version: "0.1.0",
+      version: "0.2.0",
       database: "memory",
-      inbox_dir: "~/clip-farming/inbox",
+      inbox_dir: "~/.cutflow/inbox",
     };
   }
 
@@ -143,25 +398,34 @@ export class DemoTransport implements StudioTransport {
   }
 
   async createProfile(input: ProfileCreateInput): Promise<CreatorProfile> {
-    const slug = input.name
-      .toLowerCase()
-      .replace(/[^a-z0-9]+/g, "-")
-      .replace(/^-|-$/g, "") || "creator";
+    const slug =
+      input.name
+        .toLowerCase()
+        .replace(/[^a-z0-9]+/g, "-")
+        .replace(/^-|-$/g, "") || "creator";
     const created: CreatorProfile = {
       ...this.profiles[0],
       id: slug,
       name: input.name,
       creator_name: input.creator_name ?? "",
       brief: input.brief ?? "",
+      content_mode: input.content_mode ?? "stream",
       min_duration_s: input.min_duration_s ?? 15,
-      max_duration_s: input.max_duration_s ?? 50,
+      max_duration_s: input.max_duration_s ?? 55,
       max_clips: input.max_clips ?? 8,
+      default_ratio: input.default_ratio ?? "9:16",
       layout_mode: input.layout_mode ?? "auto_split",
+      border_style: input.border_style ?? "none",
+      cinema_grade: input.cinema_grade ?? "off",
       reveal_mode: input.reveal_mode ?? "progressive",
+      caption_style: input.caption_style ?? "bold_pop",
       title_card_style: input.title_card_style ?? "seam_card_white",
+      watermark_text: input.watermark_text ?? "",
+      bgm_mode: input.bgm_mode ?? "off",
+      auto_export: input.auto_export ?? false,
       channel_urls: input.channel_urls ?? [],
       keyword_filters: input.keyword_filters ?? [],
-      inbox_path: `~/clip-farming/inbox/${slug}`,
+      inbox_path: `~/.cutflow/inbox/${slug}`,
     };
     this.profiles.push(created);
     return structuredClone(created);
@@ -187,9 +451,10 @@ export class DemoTransport implements StudioTransport {
 
   async pinWebcamToProfile(
     _projectId: string,
-    _camBox: NormalizedBox,
+    camBox: NormalizedBox,
     splitRatio: number,
   ): Promise<CreatorProfile> {
+    this.profiles[0].cam_box = camBox;
     this.profiles[0].split_ratio = splitRatio;
     return structuredClone(this.profiles[0]);
   }
@@ -198,12 +463,57 @@ export class DemoTransport implements StudioTransport {
     return structuredClone(this.sources);
   }
 
-  async uploadVideo(file: File, profileId?: string): Promise<IngestResult> {
+  async uploadVideo(
+    file: File,
+    profileId?: string,
+    _subtitleFile?: File | null,
+  ): Promise<IngestResult> {
     return this.createDemoIngest("upload", null, file.name, profileId);
   }
 
-  async ingestUrl(url: string, profileId?: string): Promise<IngestResult> {
-    return this.createDemoIngest("url", url, url, profileId);
+  async probeUrl(url: string): Promise<UrlProbeResponse> {
+    const lower = url.toLowerCase();
+    if (BLOCKED_HOSTS.some((h) => lower.includes(h))) {
+      throw new Error(
+        "This streaming site uses anti-bot/DRM protection and cannot be downloaded directly. Drop a local .mkv or .mp4 file into CutFlow instead.",
+      );
+    }
+    const isTwitch = lower.includes("twitch.tv");
+    const isYoutube = lower.includes("youtube.com") || lower.includes("youtu.be");
+    const isKick = lower.includes("kick.com");
+    return {
+      url,
+      platform: isTwitch ? "twitch" : isYoutube ? "youtube" : isKick ? "kick" : "web",
+      title: isTwitch
+        ? "Twitch Long VOD — Ranked Marathon & Reactions"
+        : "Creator Highlight Broadcast VOD",
+      channel: isTwitch ? "TwitchCreator" : "StudioChannel",
+      durationS: isTwitch ? 14_400 : 3600,
+      thumbnailUrl: null,
+      isLive: false,
+      chapters: isTwitch
+        ? [
+            { title: "Just Chatting Intro", startS: 0, endS: 1800 },
+            { title: "Main Ranked Grind", startS: 1800, endS: 9200 },
+            { title: "Final Boss & Reactions", startS: 9200, endS: 14_400 },
+          ]
+        : [],
+    };
+  }
+
+  async ingestUrl(
+    url: string,
+    profileId?: string,
+    opts?: UrlIngestOptions,
+  ): Promise<IngestResult> {
+    const lower = url.toLowerCase();
+    if (BLOCKED_HOSTS.some((h) => lower.includes(h))) {
+      throw new Error(
+        "This streaming site uses anti-bot/DRM protection and cannot be downloaded directly. Drop a local .mkv or .mp4 file into CutFlow instead.",
+      );
+    }
+    const label = opts?.title || url;
+    return this.createDemoIngest("url", url, label, opts?.profileId ?? profileId);
   }
 
   private createDemoIngest(
@@ -311,21 +621,75 @@ export class DemoTransport implements StudioTransport {
         jobId: matchingJob?.id ?? "job_demo_001",
         sourceId: edl.sourceId,
         rank,
-        score: 92,
+        score: rank === 1 ? 96 : 92,
         title: edl.title,
-        reason: "High-energy reaction climax with clean punchline boundary.",
+        reason:
+          edl.output.ratio === "1:1"
+            ? "1:1 Cinema Square · Neon Outer Glow · Ducked Synth Pulse"
+            : "High-energy reaction climax with clean punchline boundary.",
         status: edl.status,
         totalDurationMs: getTotalDurationMs(edl),
         wordCount: edl.tracks.subtitles.words.length,
         hasSlice: true,
         hasPeaks: true,
         hasThumb: false,
+        hasFilmstrip: false,
         createdAt: matchingJob?.createdAt ?? "2026-11-24T12:00:00Z",
         updatedAt: matchingJob?.updatedAt ?? "2026-11-24T12:01:00Z",
       });
       rank += 1;
     }
     return items;
+  }
+
+  async createMashup(input: MashupCreateInput): Promise<MashupCreateResponse> {
+    if (input.projectIds.length < 2) {
+      throw new Error("Select at least 2 clips to compile a mashup.");
+    }
+    const mashupId = `clip_mashup_${Date.now().toString(36)}`;
+    const first =
+      this.projects.get(input.projectIds[0]) ??
+      this.projects.values().next().value!;
+    const merged = cloneEdl(first);
+    merged.projectId = mashupId;
+    merged.title = input.title?.trim() || "Theme Mashup";
+    merged.output.ratio = "1:1";
+    merged.output.borderStyle = "thin_rounded";
+    merged.output.cinemaGrade = "crisp_hd";
+    merged.tracks.video.coldOpen = null;
+    merged.tracks.video.clips = input.projectIds.map((pid, idx) => {
+      const sub = this.projects.get(pid) ?? first;
+      const c0 = sub.tracks.video.clips[0];
+      return {
+        id: `m${idx + 1}`,
+        sourceStartMs: c0.sourceStartMs,
+        sourceEndMs: Math.min(c0.sourceEndMs, c0.sourceStartMs + 8000),
+        sourceId: sub.sourceId,
+        label: sub.title.slice(0, 32),
+        transitionIn: idx === 0 ? "none" : (input.transitionStyle ?? "flash_white"),
+        transitionDurationMs: 240,
+        transitionSfx: idx === 0 ? "none" : (input.transitionSfx ?? "whoosh_flash"),
+      };
+    });
+    const totalMs = getTotalDurationMs(merged);
+    merged.tracks.video.framing = [
+      {
+        ...merged.tracks.video.framing[0],
+        timelineStartMs: 0,
+        timelineEndMs: totalMs,
+      },
+    ];
+    this.projects.set(mashupId, merged);
+    return {
+      id: mashupId,
+      jobId: "job_demo_001",
+      sourceId: merged.sourceId,
+      title: merged.title,
+      totalDurationMs: totalMs,
+      sliceCount: merged.tracks.video.clips.length,
+      wordCount: merged.tracks.subtitles.words.length,
+      edl: cloneEdl(merged),
+    };
   }
 
   async getTimeline(projectId: string): Promise<TimelineResponse> {
@@ -364,7 +728,6 @@ export class DemoTransport implements StudioTransport {
     const peaks = new Array<number>(n).fill(0.06);
     const rms = new Array<number>(n).fill(0.04);
 
-    // Paint realistic speech bursts matching the EDL subtitle word intervals!
     const words = found?.tracks.subtitles.words ?? [];
     for (let i = 0; i < n; i += 1) {
       const tMs = (i / rateHz) * 1000;
@@ -388,6 +751,42 @@ export class DemoTransport implements StudioTransport {
 
   projectThumbUrl(_projectId: string): string | null {
     return null;
+  }
+
+  projectFilmstripUrl(_projectId: string): string | null {
+    return null;
+  }
+
+  async listBgm(): Promise<BgmAssetItem[]> {
+    return structuredClone(this.bgmAssets);
+  }
+
+  async uploadBgm(
+    file: File,
+    name = "",
+    mood = "any",
+  ): Promise<BgmAssetItem> {
+    const item: BgmAssetItem = {
+      id: `bgm_${Date.now().toString(36)}`,
+      name: name.trim() || file.name.replace(/\.[^.]+$/, ""),
+      filename: file.name,
+      mood,
+      durationMs: 24_000,
+      sizeBytes: file.size || 512_000,
+      dropOffsetMs: 2000,
+      builtin: false,
+    };
+    this.bgmAssets.unshift(item);
+    return structuredClone(item);
+  }
+
+  bgmMediaUrl(_assetId: string): string | null {
+    return null;
+  }
+
+  async deleteBgm(assetId: string): Promise<void> {
+    const idx = this.bgmAssets.findIndex((a) => a.id === assetId && !a.builtin);
+    if (idx !== -1) this.bgmAssets.splice(idx, 1);
   }
 
   async exportProject(
@@ -468,6 +867,23 @@ export class DemoTransport implements StudioTransport {
       ops.push({ op: "blade_cut", cutStartMs: sMs, cutEndMs: eMs });
     }
 
+    if (lower.includes("neon glow") || lower.includes("cinema_neon_glow")) {
+      next.tracks.subtitles.style.preset = "cinema_neon_glow";
+      applied.push("Preset → cinema_neon_glow");
+      ops.push({ op: "set_subtitles", preset: "cinema_neon_glow" });
+    } else if (lower.includes("punch glow") || lower.includes("viral_punch_glow")) {
+      next.tracks.subtitles.style.preset = "viral_punch_glow";
+      applied.push("Preset → viral_punch_glow");
+      ops.push({ op: "set_subtitles", preset: "viral_punch_glow" });
+    }
+
+    if (lower.includes("1:1") || lower.includes("square")) {
+      next.output.ratio = "1:1";
+      next.output.borderStyle = "thin_rounded";
+      applied.push("Output → 1:1 Cinema Square");
+      ops.push({ op: "set_output", ratio: "1:1", borderStyle: "thin_rounded" });
+    }
+
     if (lower.includes("single word") || lower.includes("single_word")) {
       next.tracks.subtitles.style.revealMode = "single_word";
       applied.push("Reveal mode → single_word");
@@ -484,7 +900,10 @@ export class DemoTransport implements StudioTransport {
 
     const quoted = text.match(/['"]([^'"]{1,120})['"]/);
     if (
-      (lower.includes("insert") || lower.includes("add word") || lower.includes("add '") || lower.includes('add "')) &&
+      (lower.includes("insert") ||
+        lower.includes("add word") ||
+        lower.includes("add '") ||
+        lower.includes('add "')) &&
       quoted
     ) {
       const atMatch = text.match(/\bat\s+(\d+(?:\.\d+)?)\s*s?\b/i);
@@ -519,7 +938,7 @@ export class DemoTransport implements StudioTransport {
       reply:
         applied.length > 0
           ? "Applied your edit optimistically to the timeline."
-          : "Try commands like \"cut 4s to 7s\", \"change title to 'WAIT FOR IT'\", \"single word captions\", or \"insert 'SIU!' at 5s\".",
+          : 'Try commands like "cut 4s to 7s", "neon glow captions", "1:1 square", or "insert \'WAIT\' at 5s".',
       provider: "demo-rules",
       boundaries: req.boundaries ?? this.demoBoundaries,
       totalDurationMs: getTotalDurationMs(next),
@@ -547,8 +966,8 @@ export class DemoTransport implements StudioTransport {
     const found =
       this.projects.get(projectId) ?? this.projects.values().next().value;
     const title = found?.title || "You Won't Believe This Clip";
-    const hashtags = ["#clips", "#shorts", "#gaming", "#streamer", "#viral", "#fyp"];
-    const description = `${title} — wait for the reaction! Drop a comment if you caught that.`;
+    const hashtags = ["#clips", "#shorts", "#cinema", "#edit", "#viral", "#fyp"];
+    const description = `${title} — watch until the final cut.`;
     return {
       platform,
       title,
@@ -581,7 +1000,7 @@ export class DemoTransport implements StudioTransport {
   }
 
   async clipFeedItem(feedId: string): Promise<IngestResult> {
-    return this.ingestUrl(`https://example.com/watch?v=${feedId}`);
+    return this.ingestUrl(`https://www.youtube.com/watch?v=${feedId}`);
   }
 
   async dismissFeedItem(feedId: string): Promise<void> {
@@ -593,6 +1012,7 @@ export class DemoTransport implements StudioTransport {
     return {
       settings: {
         models: { ...this.demoModels },
+        ingest: { ...this.demoIngest },
         alignment: {
           whisper_model: "medium",
           forced_aligner: "auto",
@@ -616,6 +1036,16 @@ export class DemoTransport implements StudioTransport {
         editor_model: mod.editor_model ?? this.demoModels.editor_model,
       };
     }
+    const ing = patch.ingest as
+      | { cookies_browser?: string; concurrent_fragments?: number }
+      | undefined;
+    if (ing) {
+      this.demoIngest = {
+        cookies_browser: ing.cookies_browser ?? this.demoIngest.cookies_browser,
+        concurrent_fragments:
+          ing.concurrent_fragments ?? this.demoIngest.concurrent_fragments,
+      };
+    }
     const exp = patch.export as { editor_boundaries?: string } | undefined;
     if (exp?.editor_boundaries !== undefined) {
       this.demoBoundaries = exp.editor_boundaries;
@@ -625,7 +1055,7 @@ export class DemoTransport implements StudioTransport {
 
   async getDoctor(): Promise<DoctorReport> {
     return {
-      version: "0.1.0",
+      version: "0.2.0",
       platform: "Hosted Interactive Demo (Browser)",
       python: "3.12 (Local Studio)",
       ffmpeg: "Static Demo Transport (no server required)",
@@ -636,7 +1066,7 @@ export class DemoTransport implements StudioTransport {
       nvencDetail: "Client-side Demo Mode active",
       dataRoot: "In-Memory Demo",
       freeGb: 400.0,
-      inboxRoot: "~/clip-farming/inbox",
+      inboxRoot: "~/.cutflow/inbox",
     };
   }
 

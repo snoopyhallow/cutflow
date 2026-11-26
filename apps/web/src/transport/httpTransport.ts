@@ -4,6 +4,7 @@ import {
   type TimelineProject,
 } from "../edl";
 import type {
+  BgmAssetItem,
   ClipProjectSummary,
   ClipStatus,
   CoEditorRequest,
@@ -17,6 +18,8 @@ import type {
   IngestResult,
   JobProgressEvent,
   JobSummary,
+  MashupCreateInput,
+  MashupCreateResponse,
   PostCopyResponse,
   ProfileCreateInput,
   ProjectPeaks,
@@ -25,6 +28,8 @@ import type {
   StorageSummary,
   StudioTransport,
   TimelineResponse,
+  UrlIngestOptions,
+  UrlProbeResponse,
 } from "./types";
 
 async function requestJson<T>(url: string, init?: RequestInit): Promise<T> {
@@ -110,9 +115,14 @@ export class HttpTransport implements StudioTransport {
     return requestJson<SourceSummary[]>(`${this.baseUrl}/sources`);
   }
 
-  uploadVideo(file: File, profileId?: string): Promise<IngestResult> {
+  uploadVideo(
+    file: File,
+    profileId?: string,
+    subtitleFile?: File | null,
+  ): Promise<IngestResult> {
     const form = new FormData();
     form.append("file", file);
+    if (subtitleFile) form.append("subtitle_file", subtitleFile);
     if (profileId) form.append("profile_id", profileId);
     form.append("auto_clip", "true");
     return requestJson<IngestResult>(`${this.baseUrl}/sources/upload`, {
@@ -121,10 +131,29 @@ export class HttpTransport implements StudioTransport {
     });
   }
 
-  ingestUrl(url: string, profileId?: string): Promise<IngestResult> {
+  probeUrl(url: string): Promise<UrlProbeResponse> {
+    return requestJson<UrlProbeResponse>(`${this.baseUrl}/sources/probe-url`, {
+      method: "POST",
+      body: JSON.stringify({ url }),
+    });
+  }
+
+  ingestUrl(
+    url: string,
+    profileId?: string,
+    opts?: UrlIngestOptions,
+  ): Promise<IngestResult> {
+    const body: Record<string, unknown> = {
+      url,
+      profileId: opts?.profileId ?? profileId,
+      autoClip: true,
+    };
+    if (opts?.title) body.title = opts.title;
+    if (opts?.startSec !== undefined) body.startSec = opts.startSec;
+    if (opts?.endSec !== undefined) body.endSec = opts.endSec;
     return requestJson<IngestResult>(`${this.baseUrl}/sources/url`, {
       method: "POST",
-      body: JSON.stringify({ url, profileId, autoClip: true }),
+      body: JSON.stringify(body),
     });
   }
 
@@ -177,6 +206,20 @@ export class HttpTransport implements StudioTransport {
     return requestJson<ClipProjectSummary[]>(`${this.baseUrl}/projects${qs}`);
   }
 
+  async createMashup(input: MashupCreateInput): Promise<MashupCreateResponse> {
+    const raw = await requestJson<MashupCreateResponse>(
+      `${this.baseUrl}/projects/mashup`,
+      {
+        method: "POST",
+        body: JSON.stringify(input),
+      },
+    );
+    return {
+      ...raw,
+      edl: TimelineProjectSchema.parse(raw.edl),
+    };
+  }
+
   async getTimeline(projectId: string): Promise<TimelineResponse> {
     const raw = await requestJson<{
       edl: unknown;
@@ -220,6 +263,40 @@ export class HttpTransport implements StudioTransport {
 
   projectThumbUrl(projectId: string): string {
     return `${this.baseUrl}/projects/${encodeURIComponent(projectId)}/thumb`;
+  }
+
+  projectFilmstripUrl(projectId: string): string {
+    return `${this.baseUrl}/projects/${encodeURIComponent(projectId)}/filmstrip`;
+  }
+
+  listBgm(): Promise<BgmAssetItem[]> {
+    return requestJson<BgmAssetItem[]>(`${this.baseUrl}/bgm`);
+  }
+
+  uploadBgm(
+    file: File,
+    name = "",
+    mood = "any",
+  ): Promise<BgmAssetItem> {
+    const form = new FormData();
+    form.append("file", file);
+    if (name) form.append("name", name);
+    if (mood) form.append("mood", mood);
+    return requestJson<BgmAssetItem>(`${this.baseUrl}/bgm/upload`, {
+      method: "POST",
+      body: form,
+    });
+  }
+
+  bgmMediaUrl(assetId: string): string {
+    return `${this.baseUrl}/bgm/${encodeURIComponent(assetId)}/media`;
+  }
+
+  async deleteBgm(assetId: string): Promise<void> {
+    await requestJson<void>(
+      `${this.baseUrl}/bgm/${encodeURIComponent(assetId)}`,
+      { method: "DELETE" },
+    );
   }
 
   exportProject(

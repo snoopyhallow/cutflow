@@ -30,6 +30,14 @@ def exports_dir() -> Path:
     return root() / "exports"
 
 
+def bgm_dir() -> Path:
+    return root() / "bgm"
+
+
+def sfx_dir() -> Path:
+    return root() / "sfx"
+
+
 def cache_dir() -> Path:
     return root() / "cache"
 
@@ -72,6 +80,15 @@ def inbox_dir() -> Path:
 def ensure_layout() -> Path:
     """Create all CutFlow runtime directories idempotently."""
     base = root()
-    for folder in (base, media_dir(), work_dir(), exports_dir(), cache_dir(), telemetry_dir()):
+    for folder in (
+        base,
+        media_dir(),
+        work_dir(),
+        exports_dir(),
+        bgm_dir(),
+        sfx_dir(),
+        cache_dir(),
+        telemetry_dir(),
+    ):
         folder.mkdir(parents=True, exist_ok=True)
     return base

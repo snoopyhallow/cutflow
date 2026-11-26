@@ -13,6 +13,28 @@ _EDL_CONFIG = ConfigDict(
     extra="forbid",
 )
 
+RatioLiteral = Literal["9:16", "4:5", "1:1", "16:9"]
+BorderStyleLiteral = Literal["none", "thin_rounded", "double_cinema"]
+CinemaGradeLiteral = Literal["off", "crisp_hd"]
+TransitionKindLiteral = Literal["none", "flash_white", "dip_black", "dissolve"]
+TransitionSfxLiteral = Literal["none", "whoosh_flash", "cinema_hit"]
+SubtitlePresetLiteral = Literal[
+    "bold_pop",
+    "karaoke_fill",
+    "clean_lower",
+    "boxed",
+    "cinema_neon_glow",
+    "viral_punch_glow",
+]
+OverlayKindLiteral = Literal[
+    "seam_card_white",
+    "hook_banner_dark",
+    "cta_pill",
+    "pov_top_bar",
+    "watermark_tag",
+    "cinema_credit",
+]
+
 
 class EdlModel(BaseModel):
     model_config = _EDL_CONFIG
@@ -33,11 +55,13 @@ class NormalizedBox(EdlModel):
 
 
 class OutputSpec(EdlModel):
-    ratio: Literal["9:16", "1:1", "16:9"] = "9:16"
+    ratio: RatioLiteral = "9:16"
     quality: Literal["720p", "1080p", "1440p", "4k"] = "1080p"
     speed_preset: Literal["draft", "final"] = "final"
     fps: int = Field(default=60, ge=15, le=120)
     loudness_lufs: float = Field(default=-14.0, ge=-36.0, le=-5.0)
+    border_style: BorderStyleLiteral = "none"
+    cinema_grade: CinemaGradeLiteral = "off"
 
 
 class ColdOpenBlock(EdlModel):
@@ -51,6 +75,11 @@ class VideoSlice(EdlModel):
     id: str = Field(min_length=1)
     source_start_ms: int = Field(ge=0)
     source_end_ms: int = Field(ge=1)
+    source_id: str | None = None
+    label: str = ""
+    transition_in: TransitionKindLiteral = "none"
+    transition_duration_ms: int = Field(default=220, ge=80, le=800)
+    transition_sfx: TransitionSfxLiteral = "none"
 
     @property
     def duration_ms(self) -> int:
@@ -71,6 +100,11 @@ class FramingSegment(EdlModel):
     split_ratio: float = Field(default=0.35, ge=0.20, le=0.65)
     cam_box: NormalizedBox | None = None
     game_box: NormalizedBox | None = None
+    fit_backdrop: Literal["blur", "black"] = "blur"
+    pan_x: float = Field(default=0.5, ge=0.0, le=1.0)
+    pan_y: float = Field(default=0.5, ge=0.0, le=1.0)
+    zoom: float = Field(default=1.0, ge=1.0, le=2.5)
+    source_crop_box: NormalizedBox | None = None
 
     @model_validator(mode="after")
     def _check_bounds(self) -> FramingSegment:
@@ -87,24 +121,31 @@ class VideoTrack(EdlModel):
 
 class BgmTrack(EdlModel):
     asset_id: str = Field(min_length=1)
-    gain_db: float = Field(default=-18.0, ge=-48.0, le=12.0)
+    gain_db: float = Field(default=-16.0, ge=-48.0, le=12.0)
     ducking_enabled: bool = True
+    start_offset_ms: int = Field(default=0, ge=0)
+    fade_in_ms: int = Field(default=500, ge=0, le=5000)
+    fade_out_ms: int = Field(default=1000, ge=0, le=5000)
 
 
 class AudioTrack(EdlModel):
     gain_db: float = Field(default=0.0, ge=-24.0, le=24.0)
     normalize_lufs: float = Field(default=-14.0, ge=-36.0, le=-5.0)
+    dialogue_enhance: bool = False
+    mute_original: bool = False
     bgm: BgmTrack | None = None
 
 
 class SubtitleStyle(EdlModel):
-    preset: Literal["bold_pop", "karaoke_fill", "clean_lower", "boxed"] = "bold_pop"
+    preset: SubtitlePresetLiteral = "bold_pop"
     reveal_mode: Literal["group", "progressive", "single_word"] = "progressive"
     font: str = Field(default="Montserrat-ExtraBold", min_length=1)
     font_size_scale: float = Field(default=1.0, ge=0.5, le=2.0)
     primary_color: str = Field(default="#FFFFFF", pattern=r"^#[0-9A-Fa-f]{6}$")
     accent_color: str = Field(default="#FFE500", pattern=r"^#[0-9A-Fa-f]{6}$")
     outline_color: str = Field(default="#000000", pattern=r"^#[0-9A-Fa-f]{6}$")
+    letter_spacing: float = Field(default=0.0, ge=0.0, le=12.0)
+    color_palette: list[str] = Field(default_factory=list)
 
 
 class SubtitleWord(EdlModel):
@@ -113,6 +154,7 @@ class SubtitleWord(EdlModel):
     start_ms: int = Field(ge=0)
     end_ms: int = Field(ge=1)
     speaker: str | None = None
+    glow_color: str | None = Field(default=None, pattern=r"^#[0-9A-Fa-f]{6}$")
 
     @model_validator(mode="after")
     def _check_bounds(self) -> SubtitleWord:
@@ -139,12 +181,14 @@ class SubtitleTrack(EdlModel):
 
 class OverlayItem(EdlModel):
     id: str = Field(min_length=1)
-    kind: Literal["seam_card_white", "hook_banner_dark", "cta_pill"] = "seam_card_white"
+    kind: OverlayKindLiteral = "seam_card_white"
     text: str = ""
     start_ms: int = Field(ge=0)
     end_ms: int = Field(ge=1)
     y_anchor: Literal["split_seam", "top", "bottom"] = "split_seam"
     y_offset_ratio: float = Field(default=0.0, ge=-0.5, le=0.5)
+    x_offset_ratio: float = Field(default=0.0, ge=-0.5, le=0.5)
+    opacity: float = Field(default=1.0, ge=0.1, le=1.0)
     max_lines: int = Field(default=2, ge=1, le=4)
 
     @model_validator(mode="after")

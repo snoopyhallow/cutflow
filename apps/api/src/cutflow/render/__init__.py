@@ -9,7 +9,13 @@ from .compiler import (
     render_edl_to_mp4,
     resolve_output_dimensions,
 )
-from .overlays import RenderedOverlay, compute_overlay_y_px, render_overlay_png
+from .overlays import (
+    RenderedOverlay,
+    compute_overlay_x_px,
+    compute_overlay_y_px,
+    render_border_frame_png,
+    render_overlay_png,
+)
 from .subtitles import censor_word, format_ass_time, generate_ass_subtitles, write_ass_file
 
 __all__ = [
@@ -18,11 +24,13 @@ __all__ = [
     "RenderedOverlay",
     "censor_word",
     "compile_edl_to_ffmpeg",
+    "compute_overlay_x_px",
     "compute_overlay_y_px",
     "escape_ffmpeg_filter_path",
     "format_ass_time",
     "generate_ass_subtitles",
     "nvenc_is_usable",
+    "render_border_frame_png",
     "render_edl_to_mp4",
     "render_overlay_png",
     "resolve_output_dimensions",

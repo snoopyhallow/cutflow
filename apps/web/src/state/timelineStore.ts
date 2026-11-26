@@ -10,9 +10,12 @@ import {
   insertWord,
   splitFramingSegment,
   updateWordTiming,
+  type AudioTrack,
+  type BgmTrack,
   type FramingSegment,
   type OverlayItem,
   type TimelineProject,
+  type VideoSlice,
 } from "../edl";
 
 export interface HistoryEntry {
@@ -25,7 +28,7 @@ export interface AiPatchBanner {
   previousEdl: TimelineProject;
 }
 
-export type InspectorContext = "framing" | "subtitle" | "overlay" | "export";
+export type InspectorContext = "framing" | "audio" | "subtitle" | "overlay" | "export";
 
 export interface TimelineStoreState {
   edl: TimelineProject | null;
@@ -40,6 +43,7 @@ export interface TimelineStoreState {
   outPointMs: number | null;
   selectedWordId: string | null;
   selectedOverlayId: string | null;
+  selectedClipId: string | null;
   inspectorContext: InspectorContext;
   zoomPxPerSec: number;
   dirty: boolean;
@@ -57,6 +61,7 @@ export interface TimelineStoreState {
   clearInOut: () => void;
   selectWord: (wordId: string | null) => void;
   selectOverlay: (overlayId: string | null) => void;
+  selectClip: (clipId: string | null) => void;
   setInspectorContext: (ctx: InspectorContext) => void;
   setZoomPxPerSec: (pxPerSec: number) => void;
   markSaved: () => void;
@@ -73,17 +78,55 @@ export interface TimelineStoreState {
     endMs: number,
     rollingAdjacent?: boolean,
   ) => void;
-  setWordText: (wordId: string, text: string) => void;
+  setWordText: (wordId: string, text: string, glowColor?: string | null) => void;
   addWord: (text: string, startMs: number, durationMs?: number) => void;
   removeWord: (wordId: string) => void;
   updateOverlay: (
     overlayId: string,
-    patch: Partial<Pick<OverlayItem, "text" | "startMs" | "endMs" | "yAnchor" | "yOffsetRatio" | "kind">>,
+    patch: Partial<
+      Pick<
+        OverlayItem,
+        | "text"
+        | "startMs"
+        | "endMs"
+        | "yAnchor"
+        | "yOffsetRatio"
+        | "xOffsetRatio"
+        | "opacity"
+        | "kind"
+      >
+    >,
   ) => void;
-  addOverlay: (kind: OverlayItem["kind"], text: string, startMs?: number, endMs?: number) => void;
+  addOverlay: (
+    kind: OverlayItem["kind"],
+    text: string,
+    startMs?: number,
+    endMs?: number,
+  ) => void;
   removeOverlay: (overlayId: string) => void;
   updateFraming: (
-    patch: Partial<Pick<FramingSegment, "mode" | "splitRatio" | "camBox" | "gameBox">>,
+    patch: Partial<
+      Pick<
+        FramingSegment,
+        | "mode"
+        | "splitRatio"
+        | "camBox"
+        | "gameBox"
+        | "fitBackdrop"
+        | "panX"
+        | "panY"
+        | "zoom"
+        | "sourceCropBox"
+      >
+    >,
+  ) => void;
+  updateAudio: (
+    patch: Partial<Pick<AudioTrack, "gainDb" | "dialogueEnhance" | "muteOriginal" | "normalizeLufs">>,
+  ) => void;
+  updateBgm: (patch: Partial<BgmTrack> | null) => void;
+  updateSliceTransition: (
+    clipId: string,
+    patch: Partial<Pick<VideoSlice, "transitionIn" | "transitionDurationMs" | "transitionSfx" | "label">>,
   ) => void;
   splitFramingAtPlayhead: (rightMode?: FramingSegment["mode"]) => void;
   tightenSilence: (
@@ -116,6 +159,7 @@ export const useTimelineStore = create<TimelineStoreState>((set, get) => ({
   outPointMs: null,
   selectedWordId: null,
   selectedOverlayId: null,
+  selectedClipId: null,
   inspectorContext: "framing",
   zoomPxPerSec: 130,
   dirty: false,
@@ -135,6 +179,7 @@ export const useTimelineStore = create<TimelineStoreState>((set, get) => ({
       outPointMs: null,
       selectedWordId: null,
       selectedOverlayId: null,
+      selectedClipId: edl.tracks.video.clips[0]?.id ?? null,
       inspectorContext: "framing",
       dirty: false,
       lastActionLabel: null,
@@ -197,6 +242,13 @@ export const useTimelineStore = create<TimelineStoreState>((set, get) => ({
     });
   },
 
+  selectClip(clipId) {
+    set({
+      selectedClipId: clipId,
+      inspectorContext: clipId ? "framing" : get().inspectorContext,
+    });
+  },
+
   setInspectorContext(ctx) {
     set({ inspectorContext: ctx });
   },
@@ -252,12 +304,16 @@ export const useTimelineStore = create<TimelineStoreState>((set, get) => ({
     get().commitEdl(`Align word ${wordId}`, nextEdl);
   },
 
-  setWordText(wordId, text) {
+  setWordText(wordId, text, glowColor) {
     const cleaned = text.trim();
     if (!cleaned) return;
     get().mutateEdl(`Edit word '${cleaned}'`, (draft) => {
       const target = draft.tracks.subtitles.words.find((w) => w.id === wordId);
-      if (target) target.text = cleaned;
+      if (!target) return;
+      target.text = cleaned;
+      if (glowColor !== undefined) {
+        target.glowColor = glowColor;
+      }
     });
   },
 
@@ -291,9 +347,21 @@ export const useTimelineStore = create<TimelineStoreState>((set, get) => ({
       if (patch.yOffsetRatio !== undefined) {
         target.yOffsetRatio = Math.max(-0.5, Math.min(0.5, Number(patch.yOffsetRatio.toFixed(3))));
       }
+      if (patch.xOffsetRatio !== undefined) {
+        target.xOffsetRatio = Math.max(-0.5, Math.min(0.5, Number(patch.xOffsetRatio.toFixed(3))));
+      }
+      if (patch.opacity !== undefined) {
+        target.opacity = Math.max(0.1, Math.min(1.0, Number(patch.opacity.toFixed(2))));
+      }
       if (patch.startMs !== undefined || patch.endMs !== undefined) {
-        const nextS = Math.max(0, Math.min(total - 200, Math.round(patch.startMs ?? target.startMs)));
-        const nextE = Math.max(nextS + 200, Math.min(total, Math.round(patch.endMs ?? target.endMs)));
+        const nextS = Math.max(
+          0,
+          Math.min(total - 200, Math.round(patch.startMs ?? target.startMs)),
+        );
+        const nextE = Math.max(
+          nextS + 200,
+          Math.min(total, Math.round(patch.endMs ?? target.endMs)),
+        );
         target.startMs = nextS;
         target.endMs = nextE;
       }
@@ -305,8 +373,14 @@ export const useTimelineStore = create<TimelineStoreState>((set, get) => ({
     if (!current) return;
     const total = getTotalDurationMs(current);
     const id = `ov_${Date.now().toString(36)}`;
+    const defaultEnd =
+      kind === "pov_top_bar"
+        ? Math.min(total, 3600)
+        : kind === "cinema_credit"
+          ? Math.min(total, 5000)
+          : total;
     const s = Math.max(0, Math.min(total - 500, Math.round(startMs ?? 0)));
-    const e = Math.max(s + 500, Math.min(total, Math.round(endMs ?? total)));
+    const e = Math.max(s + 500, Math.min(total, Math.round(endMs ?? defaultEnd)));
     get().mutateEdl(`Add ${kind}`, (draft) => {
       draft.tracks.overlays.push({
         id,
@@ -317,11 +391,18 @@ export const useTimelineStore = create<TimelineStoreState>((set, get) => ({
         yAnchor:
           kind === "seam_card_white"
             ? "split_seam"
-            : kind === "cta_pill"
+            : kind === "cta_pill" || kind === "watermark_tag" || kind === "cinema_credit"
               ? "bottom"
               : "top",
-        yOffsetRatio: 0,
-        maxLines: kind === "cta_pill" ? 1 : 2,
+        yOffsetRatio:
+          kind === "watermark_tag"
+            ? 0.06
+            : kind === "cinema_credit"
+              ? -0.04
+              : 0,
+        xOffsetRatio: 0,
+        opacity: kind === "watermark_tag" ? 0.78 : 1.0,
+        maxLines: kind === "cta_pill" || kind === "watermark_tag" || kind === "cinema_credit" ? 1 : 2,
       });
     });
     set({ selectedOverlayId: id, selectedWordId: null, inspectorContext: "overlay" });
@@ -350,6 +431,58 @@ export const useTimelineStore = create<TimelineStoreState>((set, get) => ({
       }
       if (patch.camBox !== undefined) seg.camBox = patch.camBox;
       if (patch.gameBox !== undefined) seg.gameBox = patch.gameBox;
+      if (patch.fitBackdrop !== undefined) seg.fitBackdrop = patch.fitBackdrop;
+      if (patch.panX !== undefined) {
+        seg.panX = Number(Math.max(0, Math.min(1, patch.panX)).toFixed(3));
+      }
+      if (patch.panY !== undefined) {
+        seg.panY = Number(Math.max(0, Math.min(1, patch.panY)).toFixed(3));
+      }
+      if (patch.zoom !== undefined) {
+        seg.zoom = Number(Math.max(1.0, Math.min(2.5, patch.zoom)).toFixed(3));
+      }
+      if (patch.sourceCropBox !== undefined) seg.sourceCropBox = patch.sourceCropBox;
+    });
+  },
+
+  updateAudio(patch) {
+    get().mutateEdl("Update dialogue audio", (draft) => {
+      const aud = draft.tracks.audio;
+      if (patch.gainDb !== undefined) aud.gainDb = patch.gainDb;
+      if (patch.dialogueEnhance !== undefined) aud.dialogueEnhance = patch.dialogueEnhance;
+      if (patch.muteOriginal !== undefined) aud.muteOriginal = patch.muteOriginal;
+      if (patch.normalizeLufs !== undefined) aud.normalizeLufs = patch.normalizeLufs;
+    });
+  },
+
+  updateBgm(patch) {
+    get().mutateEdl(patch ? "Update BGM track" : "Remove BGM track", (draft) => {
+      if (patch === null) {
+        draft.tracks.audio.bgm = null;
+        return;
+      }
+      const prev = draft.tracks.audio.bgm;
+      draft.tracks.audio.bgm = {
+        assetId: patch.assetId ?? prev?.assetId ?? "dark_cinema_pulse",
+        gainDb: patch.gainDb ?? prev?.gainDb ?? -15.5,
+        duckingEnabled: patch.duckingEnabled ?? prev?.duckingEnabled ?? true,
+        startOffsetMs: patch.startOffsetMs ?? prev?.startOffsetMs ?? 0,
+        fadeInMs: patch.fadeInMs ?? prev?.fadeInMs ?? 500,
+        fadeOutMs: patch.fadeOutMs ?? prev?.fadeOutMs ?? 1000,
+      };
+    });
+  },
+
+  updateSliceTransition(clipId, patch) {
+    get().mutateEdl(`Update slice ${clipId}`, (draft) => {
+      const target = draft.tracks.video.clips.find((c) => c.id === clipId);
+      if (!target) return;
+      if (patch.label !== undefined) target.label = patch.label;
+      if (patch.transitionIn !== undefined) target.transitionIn = patch.transitionIn;
+      if (patch.transitionDurationMs !== undefined) {
+        target.transitionDurationMs = Math.max(80, Math.min(1000, patch.transitionDurationMs));
+      }
+      if (patch.transitionSfx !== undefined) target.transitionSfx = patch.transitionSfx;
     });
   },
 

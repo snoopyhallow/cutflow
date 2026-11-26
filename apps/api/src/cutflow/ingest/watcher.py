@@ -17,6 +17,18 @@ from ..workspace import profiles as profile_store
 log = logging.getLogger(__name__)
 
 VIDEO_EXTENSIONS = {".mp4", ".mov", ".mkv", ".webm", ".m4v", ".avi"}
+SUBTITLE_EXTENSIONS = (".srt", ".vtt", ".ass")
+
+
+def _find_matching_sidecar_sub(video_entry: Path) -> Path | None:
+    stem = video_entry.stem
+    folder = video_entry.parent
+    for ext in SUBTITLE_EXTENSIONS:
+        for candidate_name in (f"{stem}{ext}", f"{stem}.en{ext}", f"{stem}.eng{ext}"):
+            cand = folder / candidate_name
+            if cand.is_file() and cand.stat().st_size > 0:
+                return cand
+    return None
 
 
 def ingest_local_file_to_media(src_path: Path, source_id: str, *, prefer_hardlink: bool) -> Path:
@@ -105,8 +117,24 @@ class InboxWatcher:
                     source_id,
                     prefer_hardlink=cfg.storage.hardlink_inbox_drops,
                 )
+                sidecar_dest: Path | None = None
+                sidecar_src = _find_matching_sidecar_sub(entry)
+                if sidecar_src is not None:
+                    sub_work = paths.work_dir() / source_id
+                    sub_work.mkdir(parents=True, exist_ok=True)
+                    sidecar_dest = sub_work / f"sidecar{sidecar_src.suffix.lower()}"
+                    shutil.copy2(sidecar_src, sidecar_dest)
+                    _move_to_processed(sidecar_src, folder)
+
                 _move_to_processed(entry, folder)
                 self._seen_fingerprints.pop(entry, None)
+
+                job_settings: dict[str, str] = {
+                    "trigger": "inbox",
+                    "originalFilename": entry.name,
+                }
+                if sidecar_dest is not None:
+                    job_settings["sidecarSubPath"] = str(sidecar_dest)
 
                 with get_session() as session:
                     session.add(
@@ -127,7 +155,7 @@ class InboxWatcher:
                             status="queued",
                             stage="queued",
                             progress=0.0,
-                            settings_json={"trigger": "inbox", "originalFilename": entry.name},
+                            settings_json=job_settings,
                         )
                     )
 

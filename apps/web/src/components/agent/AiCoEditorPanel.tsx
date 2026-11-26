@@ -1,13 +1,13 @@
 import { useState, type FormEvent } from "react";
 import {
-  Bot,
-  ChevronDown,
-  ChevronUp,
-  Loader2,
-  RotateCcw,
-  Send,
+  ArrowCounterClockwise,
+  CaretDown,
+  CaretUp,
+  CircleNotch,
+  PaperPlaneRight,
   ShieldCheck,
-} from "lucide-react";
+  TerminalWindow,
+} from "@phosphor-icons/react";
 import type { TimelineProject } from "../../edl";
 import { useTimelineStore } from "../../state/timelineStore";
 import type { StudioTransport } from "../../transport";
@@ -28,11 +28,11 @@ interface ChatTurn {
   reverted?: boolean;
 }
 
-const QUICK_PROMPTS = [
+const QUICK_COMMANDS = [
   "Tighten silence",
+  "Neon glow captions",
+  "1:1 square",
   "Single word captions",
-  "Remove cold open",
-  "Insert 'SIU!' at playhead",
 ];
 
 export function AiCoEditorPanel({
@@ -91,29 +91,29 @@ export function AiCoEditorPanel({
 
   function handleRevertTurn(turn: ChatTurn) {
     if (!turn.previousEdl) return;
-    commitEdl(`Revert AI: ${turn.instruction.slice(0, 28)}`, turn.previousEdl);
+    commitEdl(`Revert: ${turn.instruction.slice(0, 28)}`, turn.previousEdl);
     setTurns((prev) =>
       prev.map((t) => (t.id === turn.id ? { ...t, reverted: true } : t)),
     );
   }
 
   return (
-    <div className="flex h-full flex-col">
-      {/* Collapsible Persistent Edit Boundaries */}
-      <div className="border-b border-[#222836] bg-[#0F131B] px-2.5 py-1.5">
+    <div className="flex h-full flex-col bg-[#111114]">
+      {/* Persistent Edit Boundaries Drawer */}
+      <div className="border-b border-[#222228] bg-[#0C0C0F] px-2.5 py-1.5">
         <button
           type="button"
           onClick={() => setShowBoundaries((v) => !v)}
-          className="flex w-full items-center justify-between text-[11px] font-medium text-[#CBD5E1] hover:text-white"
+          className="flex w-full items-center justify-between text-[11px] font-medium text-[#A1A1AA] hover:text-[#F4F4F5]"
         >
           <span className="inline-flex items-center gap-1.5">
-            <ShieldCheck className="h-3.5 w-3.5 text-[#10B981]" />
-            Edit Boundaries
+            <ShieldCheck className="h-3.5 w-3.5 text-[#22C55E]" />
+            Editorial Guardrails
           </span>
           {showBoundaries ? (
-            <ChevronUp className="h-3.5 w-3.5 text-[#64748B]" />
+            <CaretUp className="h-3 w-3 text-[#71717A]" />
           ) : (
-            <ChevronDown className="h-3.5 w-3.5 text-[#64748B]" />
+            <CaretDown className="h-3 w-3 text-[#71717A]" />
           )}
         </button>
         {showBoundaries && (
@@ -121,76 +121,74 @@ export function AiCoEditorPanel({
             rows={2}
             value={boundaries}
             onChange={(e) => setBoundaries(e.target.value)}
-            placeholder="Rules the AI must always obey (e.g. never cut punchlines, keep white seam card)..."
-            className="mt-1.5 w-full rounded border border-[#222836] bg-[#0B0D12] p-1.5 text-[11px] text-white placeholder-[#64748B] focus:border-[#6366F1] focus:outline-none"
+            placeholder="Rules obeyed on every edit (e.g. preserve dramatic pauses, never cut punchlines)..."
+            className="mt-1.5 w-full rounded border border-[#222228] bg-[#09090B] p-1.5 text-[11px] text-[#F4F4F5] placeholder-[#71717A] focus:border-[#F59E0B] focus:outline-none"
           />
         )}
       </div>
 
-      {/* Quick Prompt Chips */}
-      <div className="flex flex-wrap gap-1 border-b border-[#222836] p-2">
-        {QUICK_PROMPTS.map((q) => (
+      {/* Studio Macro Chips */}
+      <div className="flex flex-wrap gap-1 border-b border-[#222228] p-2">
+        {QUICK_COMMANDS.map((q) => (
           <button
             key={q}
             type="button"
             disabled={busy}
             onClick={() => void submitPrompt(q)}
-            className="rounded-full border border-[#222836] bg-[#0B0D12] px-2 py-0.5 text-[10px] text-[#CBD5E1] hover:border-[#6366F1] hover:text-white disabled:opacity-45"
+            className="rounded border border-[#222228] bg-[#09090B] px-2 py-0.5 text-[10px] font-medium text-[#D4D4D8] transition-colors hover:border-[#F59E0B]/50 hover:text-white disabled:opacity-45"
           >
             {q}
           </button>
         ))}
       </div>
 
-      {/* Patch Diff Feed */}
-      <div className="flex-1 space-y-2 overflow-y-auto p-2 text-xs">
+      {/* Patch Diff Log */}
+      <div className="flex-1 space-y-2 overflow-y-auto p-2.5 text-xs">
         {error && (
-          <div className="rounded border border-[#F43F5E]/40 bg-[#F43F5E]/10 px-2 py-1.5 text-[11px] text-[#FECDD3]">
+          <div className="rounded border border-[#EF4444]/40 bg-[#EF4444]/10 px-2 py-1.5 text-[11px] text-[#FECACA]">
             {error}
           </div>
         )}
 
         {turns.length === 0 ? (
-          <div className="rounded-lg border border-dashed border-[#222836] p-4 text-center text-[11px] text-[#64748B]">
-            <Bot className="mx-auto h-5 w-5 text-[#6366F1]" />
-            <p className="mt-1.5">
-              Ask the AI Co-Editor to cut pauses, tweak captions, or change the
-              Seam Title Card. Every change applies optimistically with 1-click
-              Revert.
+          <div className="rounded-md border border-[#1E1E24] bg-[#09090B]/60 p-4 text-center text-[11px] text-[#71717A]">
+            <TerminalWindow className="mx-auto h-5 w-5 text-[#A1A1AA]" />
+            <p className="mt-1.5 leading-relaxed">
+              Issue timeline commands in plain English — cut ranges, switch to 1:1 neon glow, or
+              retime captions. Every patch is undoable in 1 click.
             </p>
           </div>
         ) : (
           turns.map((turn) => (
             <div
               key={turn.id}
-              className="space-y-1.5 rounded-lg border border-[#222836] bg-[#0B0D12] p-2.5"
+              className="space-y-1.5 rounded-md border border-[#222228] bg-[#09090B] p-2.5"
             >
-              <div className="text-[11px] font-medium text-white">
+              <div className="text-[11px] font-medium text-[#F4F4F5]">
                 &ldquo;{turn.instruction}&rdquo;
               </div>
-              <p className="text-[11px] text-[#94A3B8]">{turn.reply}</p>
+              <p className="text-[11px] text-[#A1A1AA]">{turn.reply}</p>
 
-              {/* Compact Patch Diff Card */}
               {turn.applied.length > 0 && (
-                <div className="space-y-1.5 rounded border border-[#6366F1]/35 bg-[#6366F1]/10 p-2">
+                <div className="space-y-1.5 rounded border border-[#2C2C35] bg-[#141418] p-2">
                   <div className="flex items-center justify-between text-[10px]">
-                    <span className="font-semibold uppercase tracking-wider text-[#A5B4FC]">
-                      Patch Diff ({turn.provider})
+                    <span className="tabular-tc font-semibold uppercase tracking-wider text-[#F59E0B]">
+                      EDL PATCH · {turn.provider}
                     </span>
                     {turn.previousEdl && !turn.reverted ? (
                       <button
                         type="button"
                         onClick={() => handleRevertTurn(turn)}
-                        className="inline-flex items-center gap-1 rounded bg-[#1A202C] px-1.5 py-0.5 text-[10px] font-medium text-white hover:bg-[#2E374A]"
+                        className="inline-flex items-center gap-1 rounded border border-[#32323B] bg-[#1C1C22] px-1.5 py-0.5 text-[10px] font-medium text-[#F4F4F5] hover:bg-[#27272F]"
                       >
-                        <RotateCcw className="h-2.5 w-2.5" />
+                        <ArrowCounterClockwise className="h-2.5 w-2.5" />
                         Revert
                       </button>
                     ) : turn.reverted ? (
-                      <span className="text-[10px] text-[#F59E0B]">Reverted</span>
+                      <span className="text-[10px] text-[#71717A]">Reverted</span>
                     ) : null}
                   </div>
-                  <ul className="space-y-0.5 text-[11px] text-[#D1FAE5]">
+                  <ul className="tabular-tc space-y-0.5 text-[10px] text-[#4ADE80]">
                     {turn.applied.map((line, i) => (
                       <li key={i}>+ {line}</li>
                     ))}
@@ -202,28 +200,28 @@ export function AiCoEditorPanel({
         )}
       </div>
 
-      {/* Prompt Input Bar */}
+      {/* Command Input */}
       <form
         onSubmit={handleFormSubmit}
-        className="flex items-center gap-1.5 border-t border-[#222836] bg-[#0F131B] p-2"
+        className="flex items-center gap-1.5 border-t border-[#222228] bg-[#0C0C0F] p-2"
       >
         <input
           type="text"
           value={instruction}
           onChange={(e) => setInstruction(e.target.value)}
-          placeholder="e.g. cut 4s to 7s or change title..."
-          className="min-w-0 flex-1 rounded border border-[#222836] bg-[#0B0D12] px-2 py-1.5 text-xs text-white placeholder-[#64748B] focus:border-[#6366F1] focus:outline-none"
+          placeholder="Command: cut 4s to 7s, neon glow..."
+          className="min-w-0 flex-1 rounded border border-[#222228] bg-[#09090B] px-2.5 py-1.5 text-xs text-[#F4F4F5] placeholder-[#71717A] focus:border-[#F59E0B] focus:outline-none"
         />
         <button
           type="submit"
           disabled={busy || !instruction.trim()}
-          aria-label="Send to AI Co-Editor"
-          className="inline-flex items-center justify-center rounded bg-[#6366F1] p-1.5 text-white hover:bg-[#5558E6] disabled:opacity-45"
+          aria-label="Run command"
+          className="inline-flex items-center justify-center rounded bg-[#F59E0B] p-1.5 text-[#09090B] transition-colors hover:bg-[#FBBF24] disabled:opacity-40"
         >
           {busy ? (
-            <Loader2 className="h-3.5 w-3.5 animate-spin" />
+            <CircleNotch className="h-3.5 w-3.5 animate-spin" />
           ) : (
-            <Send className="h-3.5 w-3.5" />
+            <PaperPlaneRight weight="fill" className="h-3.5 w-3.5" />
           )}
         </button>
       </form>

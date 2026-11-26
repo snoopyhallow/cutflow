@@ -1,28 +1,74 @@
-"""Audio/media utilities: FFprobe, 16kHz WAV, 100Hz peaks, lossless slices, and 20ms aligner."""
+"""Audio/media utilities: FFprobe, 5.1 mix, BGM/SFX, embedded SRT, WAV, peaks, slices & aligner."""
 
 from .align import WordTiming, align_words_to_audio, run_clip_scoped_alignment
+from .bgm import (
+    AUDIO_EXTENSIONS,
+    BgmAsset,
+    delete_bgm_asset,
+    ensure_starter_audio_assets,
+    find_bgm_start_offset_ms,
+    list_bgm_assets,
+    resolve_bgm_asset_path,
+    resolve_sfx_path,
+    save_uploaded_bgm,
+    select_bgm_track_for_profile,
+)
 from .media import (
     MediaError,
     MediaInfo,
+    SubtitleStreamInfo,
+    detect_active_video_box,
+    dialogue_downmix_filter,
+    extract_filmstrip_jpeg,
     extract_frame_jpeg,
     extract_lossless_clip_slice,
     extract_wav_16k,
+    lang_matches,
     probe_media,
 )
 from .peaks import compute_peaks_100hz, compute_rms_windows, read_mono_pcm_f32, write_peaks_json
+from .subtitles_ingest import (
+    clean_dialogue_cue_text,
+    extract_embedded_subtitles,
+    load_sidecar_subtitle_file,
+    parse_subtitle_text,
+    select_best_subtitle_stream,
+    words_from_cue_text,
+)
 
 __all__ = [
+    "AUDIO_EXTENSIONS",
+    "BgmAsset",
     "MediaError",
     "MediaInfo",
+    "SubtitleStreamInfo",
     "WordTiming",
     "align_words_to_audio",
+    "clean_dialogue_cue_text",
     "compute_peaks_100hz",
     "compute_rms_windows",
+    "delete_bgm_asset",
+    "detect_active_video_box",
+    "dialogue_downmix_filter",
+    "ensure_starter_audio_assets",
+    "extract_embedded_subtitles",
+    "extract_filmstrip_jpeg",
     "extract_frame_jpeg",
     "extract_lossless_clip_slice",
     "extract_wav_16k",
+    "find_bgm_start_offset_ms",
+    "lang_matches",
+    "list_bgm_assets",
+    "load_sidecar_subtitle_file",
+    "parse_subtitle_text",
     "probe_media",
     "read_mono_pcm_f32",
+    "resolve_bgm_asset_path",
+    "resolve_sfx_path",
     "run_clip_scoped_alignment",
+    "save_uploaded_bgm",
+    "select_bgm_track_for_profile",
+    "select_best_subtitle_stream",
+    "words_from_cue_text",
     "write_peaks_json",
 ]

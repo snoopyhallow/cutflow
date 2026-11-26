@@ -4,16 +4,18 @@ from __future__ import annotations
 
 import json
 import logging
-import shutil
 import subprocess
 from typing import Any
+from urllib.parse import urlparse
 
 from sqlalchemy import select
 
+from .. import config
 from ..db import FeedItemRow, get_session
 from ..db.models import new_id
 from ..security import SSRFError, validate_public_url
 from ..workspace.profiles import CreatorProfile, list_profiles
+from .downloader import DownloadError, _cookie_args, find_ytdlp
 
 log = logging.getLogger(__name__)
 
@@ -26,10 +28,26 @@ def _matches_keywords(title: str, keywords: list[str]) -> bool:
     return any(kw in lower for kw in cleaned)
 
 
-def _fetch_channel_entries(channel_url: str, limit: int = 8) -> list[dict[str, Any]]:
+def _fallback_item_url(channel_url: str, ext_id: str) -> str:
+    host = (urlparse(channel_url).hostname or "").lower()
+    clean_id = ext_id.lstrip("v") if host.endswith("twitch.tv") else ext_id
+    if host.endswith("twitch.tv"):
+        return f"https://www.twitch.tv/videos/{clean_id}"
+    if host.endswith("kick.com"):
+        return f"https://kick.com/video/{ext_id}"
+    return f"https://www.youtube.com/watch?v={ext_id}"
+
+
+def _fetch_channel_entries(
+    channel_url: str,
+    *,
+    limit: int = 8,
+    cookies_browser: str = "none",
+) -> list[dict[str, Any]]:
     safe_url = validate_public_url(channel_url)
-    ytdlp = shutil.which("yt-dlp")
-    if not ytdlp:
+    try:
+        ytdlp = find_ytdlp()
+    except DownloadError:
         return []
     cmd = [
         ytdlp,
@@ -38,6 +56,7 @@ def _fetch_channel_entries(channel_url: str, limit: int = 8) -> list[dict[str, A
         "--playlist-end",
         str(limit),
         "--no-warnings",
+        *_cookie_args(cookies_browser),
         "--",
         safe_url,
     ]
@@ -55,10 +74,15 @@ def _fetch_channel_entries(channel_url: str, limit: int = 8) -> list[dict[str, A
 
 def poll_profile_feed(profile: CreatorProfile, *, limit: int = 8) -> list[dict[str, Any]]:
     """Poll one Creator Profile's followed channels and store newly discovered videos."""
+    cfg = config.load()
     discovered: list[dict[str, Any]] = []
     for channel_url in profile.channel_urls:
         try:
-            entries = _fetch_channel_entries(channel_url, limit=limit)
+            entries = _fetch_channel_entries(
+                channel_url,
+                limit=limit,
+                cookies_browser=cfg.ingest.cookies_browser,
+            )
         except SSRFError as exc:
             log.warning("Skipping unsafe channel URL %s: %s", channel_url, exc)
             continue
@@ -68,13 +92,11 @@ def poll_profile_feed(profile: CreatorProfile, *, limit: int = 8) -> list[dict[s
                 continue
             ext_id = str(entry.get("id") or "").strip()
             title = str(entry.get("title") or "").strip()
-            item_url = str(entry.get("url") or entry.get("webpage_url") or "").strip()
+            item_url = str(entry.get("webpage_url") or entry.get("url") or "").strip()
             if not ext_id or not title:
                 continue
-            if item_url and not item_url.startswith(("http://", "https://")):
-                item_url = f"https://www.youtube.com/watch?v={ext_id}"
-            if not item_url:
-                item_url = f"https://www.youtube.com/watch?v={ext_id}"
+            if not item_url or not item_url.startswith(("http://", "https://")):
+                item_url = _fallback_item_url(channel_url, ext_id)
             if not _matches_keywords(title, profile.keyword_filters):
                 continue
 

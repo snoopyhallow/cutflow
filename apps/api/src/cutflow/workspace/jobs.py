@@ -1,10 +1,11 @@
-"""Single-GPU resumable AutoClip pipeline job queue with SSE event streaming."""
+"""Single-GPU resumable AutoClip & Cinema pipeline job queue with SSE event streaming."""
 
 from __future__ import annotations
 
 import asyncio
 import contextlib
 import logging
+import time
 from collections import defaultdict
 from collections.abc import AsyncIterator, Callable
 from pathlib import Path
@@ -16,6 +17,7 @@ from .. import config, paths
 from ..ai import (
     HighlightCandidate,
     TranscriptResult,
+    auto_reframe_slices,
     build_clip_edl,
     build_hype_curve,
     detect_webcam_box,
@@ -26,16 +28,20 @@ from ..ai import (
 )
 from ..audio import (
     WordTiming,
+    detect_active_video_box,
+    extract_embedded_subtitles,
+    extract_filmstrip_jpeg,
     extract_frame_jpeg,
     extract_lossless_clip_slice,
     extract_wav_16k,
+    load_sidecar_subtitle_file,
     probe_media,
     run_clip_scoped_alignment,
     write_peaks_json,
 )
 from ..db import ClipProjectRow, JobRow, SourceRow, get_session
 from ..db.models import new_id, utcnow_iso
-from ..edl import NormalizedBox
+from ..edl import NormalizedBox, auto_tighten_silence
 from ..ingest.downloader import download_video_url
 from ..telemetry import track_stage
 from . import profiles as profile_store
@@ -132,6 +138,37 @@ def _slice_words_for_clip(
     return out
 
 
+def _slice_words_for_arc(
+    words: list[WordTiming],
+    slices: list[tuple[int, int]],
+    clip_wav: Path | None,
+    aligner_mode: str,
+) -> list[WordTiming]:
+    """Extract and align clip-relative words across one or more story-arc sub-slices."""
+    if len(slices) == 1:
+        raw = _slice_words_for_clip(words, slices[0][0], slices[0][1])
+        if clip_wav is not None and clip_wav.is_file():
+            return run_clip_scoped_alignment(raw, clip_wav, mode=aligner_mode)
+        return raw
+
+    combined: list[WordTiming] = []
+    offset_ms = 0
+    for s0, s1 in slices:
+        part = _slice_words_for_clip(words, s0, s1)
+        for item in part:
+            combined.append(
+                WordTiming(
+                    text=item.text,
+                    start_ms=offset_ms + item.start_ms,
+                    end_ms=offset_ms + item.end_ms,
+                    speaker=item.speaker,
+                    confidence=item.confidence,
+                )
+            )
+        offset_ms += max(0, s1 - s0)
+    return combined
+
+
 def run_job_pipeline_sync(
     job_id: str,
     *,
@@ -140,7 +177,7 @@ def run_job_pipeline_sync(
     highlight_finder: Callable[..., list[HighlightCandidate]] = discover_highlights,
     webcam_detector: Callable[..., NormalizedBox | None] = detect_webcam_box,
 ) -> list[str]:
-    """Execute the full Multi-Signal AutoClip pipeline synchronously for one job."""
+    """Execute the full Multi-Signal Stream & Cinema pipeline synchronously for one job."""
     cfg = config.load()
     with get_session() as session:
         job = session.get(JobRow, job_id)
@@ -156,6 +193,7 @@ def run_job_pipeline_sync(
         source_title = source.title
         heatmap = source.heatmap_json
         profile_id = job.profile_id
+        job_settings = dict(job.settings_json or {})
 
     profile = (
         profile_store.get_profile(profile_id)
@@ -163,17 +201,48 @@ def run_job_pipeline_sync(
         else None
     ) or profile_store.list_profiles()[0]
 
+    preferred_lang = profile.preferred_lang or cfg.ingest.preferred_audio_lang or "en"
     work_root = paths.work_dir() / source_id
     work_root.mkdir(parents=True, exist_ok=True)
 
     try:
-        # Stage 0: Download remote URL if not yet downloaded locally
+        # Stage 0: Download remote URL (or Twitch/VOD Start-End section) with 8x parallel HLS
         if source_type == "url" and (not str(source_path) or not source_path.is_file()):
             if not source_url:
                 raise ValueError("URL source is missing its remote url.")
+            start_sec = job_settings.get("startSec")
+            end_sec = job_settings.get("endSec")
             _update_job(job_id, status="running", stage="download", progress=0.02, bus=bus)
+
+            last_emit = 0.0
+
+            def _on_dl_progress(frac: float, detail: str) -> None:
+                nonlocal last_emit
+                now = time.monotonic()
+                if now - last_emit < 0.75 and frac < 0.99:
+                    return
+                last_emit = now
+                mapped_pct = 0.02 + 0.12 * max(0.0, min(1.0, frac))
+                _update_job(
+                    job_id,
+                    stage="download",
+                    progress=mapped_pct,
+                    settings_patch={"downloadDetail": detail},
+                    bus=bus,
+                    extra_event={"downloadDetail": detail},
+                )
+
             with track_stage(job_id, "download"):
-                dl = download_video_url(source_url, paths.media_dir(), source_id)
+                dl = download_video_url(
+                    source_url,
+                    paths.media_dir(),
+                    source_id,
+                    start_sec=float(start_sec) if start_sec is not None else None,
+                    end_sec=float(end_sec) if end_sec is not None else None,
+                    concurrent_fragments=cfg.ingest.concurrent_fragments,
+                    cookies_browser=cfg.ingest.cookies_browser,
+                    on_progress=_on_dl_progress if bus is not None else None,
+                )
             source_path = dl.path
             source_title = dl.title or source_title
             heatmap = dl.heatmap
@@ -185,10 +254,11 @@ def run_job_pipeline_sync(
                     src_row.channel = dl.channel or src_row.channel
                     src_row.heatmap_json = dl.heatmap
 
-        # Stage 1: FFprobe media inspection
-        _update_job(job_id, status="running", stage="probe", progress=0.08, bus=bus)
+        # Stage 1: FFprobe multi-track inspection + Cinema Letterbox cropdetect
+        _update_job(job_id, status="running", stage="probe", progress=0.14, bus=bus)
         with track_stage(job_id, "probe"):
-            media = probe_media(source_path)
+            media = probe_media(source_path, preferred_lang=preferred_lang)
+            active_video_box = detect_active_video_box(source_path, media)
 
         with get_session() as session:
             src_row = session.get(SourceRow, source_id)
@@ -198,43 +268,75 @@ def run_job_pipeline_sync(
                 src_row.height = media.height
                 src_row.fps = media.fps
 
-        # Stage 2: Extract 16kHz WAV + Multi-Signal Hype Curve
-        _update_job(job_id, stage="audio_hype", progress=0.20, bus=bus)
+        center_boost = profile.content_mode == "cinema" or media.audio_channels >= 6
+
+        # Stage 2: Check Sidecar / Embedded Subtitles (<0.5s $0 ASR bypass) + Extract 16k WAV
+        _update_job(job_id, stage="audio_hype", progress=0.24, bus=bus)
+        pre_transcript: TranscriptResult | None = None
+        sidecar_raw = job_settings.get("sidecarSubPath")
+        if sidecar_raw and Path(sidecar_raw).is_file():
+            with contextlib.suppress(Exception):
+                pre_transcript = load_sidecar_subtitle_file(
+                    Path(sidecar_raw), language=preferred_lang
+                )
+        if pre_transcript is None and media.subtitle_streams:
+            with track_stage(job_id, "embedded_subs"):
+                pre_transcript = extract_embedded_subtitles(
+                    source_path, media, preferred_lang=preferred_lang
+                )
+
         wav_path = work_root / "source_16k.wav"
         with track_stage(job_id, "audio_hype"):
-            extract_wav_16k(source_path, wav_path)
-            hype_curve = build_hype_curve(wav_path, heatmap=heatmap)
+            extract_wav_16k(
+                source_path,
+                wav_path,
+                audio_rel_index=media.preferred_audio_rel_index,
+                audio_channels=media.audio_channels,
+                center_dialogue_boost=center_boost,
+            )
+            hype_curve = build_hype_curve(
+                wav_path,
+                heatmap=heatmap,
+                content_mode=profile.content_mode,
+                dialogue_segments=pre_transcript.segments if pre_transcript else None,
+            )
             hot_windows = select_hot_windows(hype_curve, media.duration_ms)
 
-        # Persist downsampled hype curve (at most 120 points) for Dashboard chart
+        # Persist downsampled hype curve (at most 120 points) + letterbox metadata
         step = max(1, len(hype_curve) // 120)
         compact_curve = [pt.to_dict() for pt in hype_curve[::step]]
         _update_job(
             job_id,
             stage="transcribe",
-            progress=0.38,
+            progress=0.40,
             settings_patch={
                 "hypeCurve": compact_curve,
                 "hotWindowCount": len(hot_windows),
+                "activeVideoBox": active_video_box,
+                "audioChannels": media.audio_channels,
+                "audioStreamIndex": media.preferred_audio_rel_index,
             },
             bus=bus,
             extra_event={"hypeCurve": compact_curve},
         )
 
-        # Stage 3: Hybrid ASR transcription (hot-window scoped on long VODs > 25 min!)
+        # Stage 3: Use instant Embedded/Sidecar Subtitles when present, else Hybrid Hot-Window ASR
         prompt_terms = ", ".join(
             t for t in [profile.creator_name, profile.name, *profile.keyword_filters] if t
         )
-        with track_stage(job_id, "transcribe", windows=len(hot_windows)):
-            transcript = transcribe_hot_windows(
-                wav_path,
-                hot_windows,
-                initial_prompt=prompt_terms,
-                settings=cfg,
-                transcriber_fn=transcriber,
-            )
+        if pre_transcript is not None and pre_transcript.segments:
+            transcript = pre_transcript
+        else:
+            with track_stage(job_id, "transcribe", windows=len(hot_windows)):
+                transcript = transcribe_hot_windows(
+                    wav_path,
+                    hot_windows,
+                    initial_prompt=prompt_terms,
+                    settings=cfg,
+                    transcriber_fn=transcriber,
+                )
 
-        # Stage 4: Brief-tuned Highlight & Hook-Card discovery
+        # Stage 4: Brief-tuned Highlight / Multi-Act Cinema Story-Arc discovery
         _update_job(job_id, stage="highlights", progress=0.62, bus=bus)
         with track_stage(job_id, "highlights", asr=transcript.provider):
             candidates = highlight_finder(
@@ -245,7 +347,7 @@ def run_job_pipeline_sync(
                 source_title=source_title,
             )
 
-        # Stage 5: Zero-copy lossless clip slices + clip-scoped alignment + 100Hz peaks + EDL v1
+        # Stage 5: AAC clip slices + clip word alignment + 100Hz peaks + filmstrip + EDL
         _update_job(job_id, stage="slice_align", progress=0.76, bus=bus)
         created_ids: list[str] = []
         slice_origins: dict[str, int] = {}
@@ -265,29 +367,56 @@ def run_job_pipeline_sync(
                     clip_end_ms=cand.end_ms,
                     handle_ms=3000,
                     source_duration_ms=media.duration_ms,
+                    audio_rel_index=media.preferred_audio_rel_index,
+                    audio_codec=media.audio_codec,
+                    audio_channels=media.audio_channels,
+                    video_codec=media.video_codec,
+                    center_dialogue_boost=center_boost,
                 )
 
+                clip_dur_ms = max(500, cand.end_ms - cand.start_ms)
                 clip_wav = clip_dir / "clip_16k.wav"
                 extract_wav_16k(
                     source_path,
                     clip_wav,
                     start_ms=cand.start_ms,
-                    duration_ms=max(500, cand.end_ms - cand.start_ms),
+                    duration_ms=clip_dur_ms,
+                    audio_rel_index=media.preferred_audio_rel_index,
+                    audio_channels=media.audio_channels,
+                    center_dialogue_boost=center_boost,
                 )
                 peaks_path = write_peaks_json(clip_wav, clip_dir / "peaks.json", rate_hz=100)
 
                 mid_ms = (cand.start_ms + cand.end_ms) // 2
                 thumb_path = extract_frame_jpeg(source_path, clip_dir / "thumb.jpg", mid_ms)
+                with contextlib.suppress(Exception):
+                    extract_filmstrip_jpeg(
+                        source_path,
+                        clip_dir / "filmstrip.jpg",
+                        start_ms=cand.start_ms,
+                        duration_ms=clip_dur_ms,
+                    )
 
                 if not cam_checked:
                     detected_cam_box = profile.cam_box or webcam_detector(thumb_path, profile)
                     cam_checked = True
 
-                raw_clip_words = _slice_words_for_clip(transcript.words, cand.start_ms, cand.end_ms)
-                aligned_words = run_clip_scoped_alignment(
-                    raw_clip_words,
-                    clip_wav,
-                    mode=cfg.alignment.forced_aligner,
+                arc_bounds = (
+                    cand.slices
+                    if (cand.slices and len(cand.slices) >= 2)
+                    else [(cand.start_ms, cand.end_ms)]
+                )
+                aligned_words = _slice_words_for_arc(
+                    transcript.words,
+                    arc_bounds,
+                    clip_wav if len(arc_bounds) == 1 else None,
+                    cfg.alignment.forced_aligner,
+                )
+
+                crop_box_model = (
+                    NormalizedBox.model_validate(active_video_box).clamped()
+                    if isinstance(active_video_box, dict)
+                    else None
                 )
 
                 edl = build_clip_edl(
@@ -298,8 +427,34 @@ def run_job_pipeline_sync(
                     candidate=cand,
                     aligned_clip_words=aligned_words,
                     cam_box=detected_cam_box,
+                    source_crop_box=crop_box_model,
+                    source_title=source_title,
                     loudness_lufs=cfg.export.loudness_lufs,
                 )
+
+                # Zero-Touch Per-Shot Face Reframe on Cinema / auto_reframe profiles
+                if profile.layout_mode == "auto_reframe" or (
+                    profile.content_mode == "cinema"
+                    and profile.layout_mode in ("centre", "crop")
+                ):
+                    co_ms = (
+                        edl.tracks.video.cold_open.duration_ms
+                        if (edl.tracks.video.cold_open and edl.tracks.video.cold_open.enabled)
+                        else 0
+                    )
+                    edl.tracks.video.framing = auto_reframe_slices(
+                        edl.tracks.video.clips,
+                        default_media_path=source_path,
+                        cold_open_ms=co_ms,
+                        source_crop_box=crop_box_model,
+                        mode="crop" if profile.content_mode == "cinema" else "centre",
+                        fit_backdrop=profile.fit_backdrop,
+                    )
+
+                # Optional Zero-Touch Auto-Tighten Silence for fast-paced Gaming profiles
+                if profile.auto_tighten_silence and len(arc_bounds) == 1:
+                    with contextlib.suppress(Exception):
+                        edl, _, _ = auto_tighten_silence(edl, min_gap_ms=1100)
 
                 with get_session() as session:
                     session.add(
@@ -343,7 +498,10 @@ def run_job_pipeline_sync(
             status="done",
             stage="done",
             progress=1.0,
-            settings_patch={"projectIds": created_ids},
+            settings_patch={
+                "projectIds": created_ids,
+                "transcriptProvider": transcript.provider,
+            },
             bus=bus,
             extra_event={"projectIds": created_ids},
         )
@@ -387,7 +545,6 @@ class JobManager:
         try:
             loop = asyncio.get_running_loop()
         except RuntimeError:
-            # No running loop (e.g., synchronous caller) -> run inline
             run_job_pipeline_sync(job_id, bus=self.bus)
             return
 

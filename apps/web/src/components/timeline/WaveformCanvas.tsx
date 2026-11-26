@@ -14,7 +14,7 @@ export function WaveformCanvas({
   peaks,
   totalDurationMs,
   widthPx,
-  heightPx = 44,
+  heightPx = 36,
   coldOpenMs = 0,
   showOnsetMarkers = true,
 }: WaveformCanvasProps) {
@@ -37,9 +37,8 @@ export function WaveformCanvas({
     ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
     ctx.clearRect(0, 0, w, h);
 
-    // Subtle baseline
     const midY = h / 2;
-    ctx.strokeStyle = "rgba(16, 185, 129, 0.2)";
+    ctx.strokeStyle = "rgba(161, 161, 170, 0.14)";
     ctx.lineWidth = 1;
     ctx.beginPath();
     ctx.moveTo(0, midY);
@@ -58,29 +57,35 @@ export function WaveformCanvas({
     for (let b = 0; b < nBars; b += 1) {
       const x = b * barStep;
       const tMs = (x / w) * totalDurationMs;
-      // Offset waveform body cleanly if cold open precedes main peaks
-      const sampleTimeMs = Math.max(0, tMs - (peaks.durationMs < totalDurationMs - 200 ? coldOpenMs : 0));
-      const idx = Math.min(totalSamples - 1, Math.max(0, Math.floor(sampleTimeMs * samplesPerMs)));
+      const sampleTimeMs = Math.max(
+        0,
+        tMs - (peaks.durationMs < totalDurationMs - 200 ? coldOpenMs : 0),
+      );
+      const idx = Math.min(
+        totalSamples - 1,
+        Math.max(0, Math.floor(sampleTimeMs * samplesPerMs)),
+      );
       const peakVal = peaks.peaks[idx] ?? 0;
       const rmsVal = peaks.rms[idx] ?? peakVal * 0.7;
 
-      const peakH = Math.max(1.5, peakVal * (h * 0.46));
-      const rmsH = Math.max(1, rmsVal * (h * 0.44));
+      const peakH = Math.max(1.2, peakVal * (h * 0.46));
+      const rmsH = Math.max(0.8, rmsVal * (h * 0.42));
 
-      // Outer peak bar (Emerald)
-      ctx.fillStyle = "rgba(16, 185, 129, 0.42)";
-      ctx.fillRect(x, midY - peakH, 1.5, peakH * 2);
+      // Outer peak transient bar (studio zinc)
+      ctx.fillStyle = "rgba(161, 161, 170, 0.34)";
+      ctx.fillRect(x, midY - peakH, 1.4, peakH * 2);
 
-      // Inner dense RMS bar
-      ctx.fillStyle = peakVal > 0.5 ? "rgba(52, 211, 153, 0.92)" : "rgba(16, 185, 129, 0.72)";
-      ctx.fillRect(x, midY - rmsH, 1.5, rmsH * 2);
+      // Inner dense RMS vocal core
+      ctx.fillStyle =
+        peakVal > 0.52 ? "rgba(244, 244, 245, 0.88)" : "rgba(212, 212, 216, 0.62)";
+      ctx.fillRect(x, midY - rmsH, 1.4, rmsH * 2);
 
-      // Highlight sharp voice onsets when Snap-to-Waveform is active
+      // Warm Amber speech onset tick when Snap-to-Waveform is active
       if (showOnsetMarkers && idx > 0) {
         const rise = peakVal - (peaks.peaks[idx - 1] ?? 0);
         if (rise > 0.22 && peakVal > 0.32) {
-          ctx.fillStyle = "rgba(245, 158, 11, 0.55)";
-          ctx.fillRect(x, 1, 1, 5);
+          ctx.fillStyle = "rgba(245, 158, 11, 0.7)";
+          ctx.fillRect(x, 1, 1, 4);
         }
       }
     }

@@ -12,6 +12,7 @@ import typer
 import uvicorn
 
 from . import __version__, db, paths
+from .ingest.downloader import DownloadError, find_ytdlp
 from .workspace.benchmark import run_benchmark
 
 cli = typer.Typer(name="cutflow", help="CutFlow AI Video Clipping Studio CLI.")
@@ -98,6 +99,11 @@ def inspect_environment() -> dict[str, object]:
         if code == 0 and smi_out:
             gpu_line = smi_out.splitlines()[0]
 
+    try:
+        has_ytdlp = bool(find_ytdlp())
+    except DownloadError:
+        has_ytdlp = False
+
     disk = shutil.disk_usage(paths.root() if paths.root().exists() else paths.root().parent)
     free_gb = round(disk.free / (1024**3), 1)
     return {
@@ -106,7 +112,7 @@ def inspect_environment() -> dict[str, object]:
         "python": sys.version.split()[0],
         "ffmpeg": first_ff,
         "libass": has_libass,
-        "ytDlp": bool(shutil.which("yt-dlp")),
+        "ytDlp": has_ytdlp,
         "gpu": gpu_line,
         "nvencOk": nvenc_ok,
         "nvencDetail": nvenc_detail,

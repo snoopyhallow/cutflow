@@ -387,3 +387,40 @@ def encode_compact_transcript(segments: list[TranscriptSegment], max_chars: int 
         lines.append(line)
         total += len(line) + 1
     return "\n".join(lines)
+
+
+def chunk_compact_transcript(
+    segments: list[TranscriptSegment],
+    *,
+    chunk_chars: int = 26_000,
+    max_chunks: int = 6,
+) -> list[str]:
+    """Split long 2-hour movie/VOD transcripts into Act chunks so climaxes are never truncated."""
+    if not segments:
+        return []
+    chunks: list[str] = []
+    bucket: list[str] = []
+    bucket_len = 0
+
+    for seg in segments:
+        text = seg.text.strip()
+        if not text:
+            continue
+        s = seg.start_ms / 1000.0
+        mm = int(s // 60)
+        ss = s % 60
+        line = f"[{mm:02d}:{ss:04.1f}] {text}"
+        if bucket and bucket_len + len(line) + 1 > chunk_chars:
+            chunks.append("\n".join(bucket))
+            if len(chunks) >= max_chunks:
+                return chunks
+            # Keep 2-line overlap across Act boundaries so cross-boundary scenes stay intact
+            overlap = bucket[-2:] if len(bucket) >= 2 else bucket[-1:]
+            bucket = list(overlap)
+            bucket_len = sum(len(x) + 1 for x in bucket)
+        bucket.append(line)
+        bucket_len += len(line) + 1
+
+    if bucket and len(chunks) < max_chunks:
+        chunks.append("\n".join(bucket))
+    return chunks

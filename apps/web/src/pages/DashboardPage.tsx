@@ -1,17 +1,32 @@
 import { useRef, useState, type DragEvent, type FormEvent } from "react";
 import {
   Archive,
-  Clapperboard,
-  FolderSearch,
-  FolderUp,
-  HardDrive,
-  Link2,
-  Loader2,
-  Radio,
-  RefreshCw,
-  Sparkles,
+  ArrowsClockwise,
+  Broadcast,
+  CheckSquare,
+  CircleNotch,
+  FilmStrip,
+  FolderOpen,
+  HardDrives,
+  Intersect,
+  MagnifyingGlass,
+  Scissors,
+  Square,
+  Subtitles,
+  UploadSimple,
+  WarningCircle,
   X,
-} from "lucide-react";
+} from "@phosphor-icons/react";
+import {
+  KickIcon,
+  PlatformMark,
+  TikTokIcon,
+  TwitchIcon,
+  XBrandIcon,
+  YouTubeIcon,
+  detectPlatformFromUrl,
+} from "../components/ui/BrandIcons";
+import { SegmentedControl, StudioSelect } from "../components/ui/StudioControls";
 import { formatTimecodeMs } from "../edl";
 import type {
   ClipProjectSummary,
@@ -22,6 +37,7 @@ import type {
   SourceSummary,
   StorageSummary,
   StudioTransport,
+  UrlProbeResponse,
 } from "../transport";
 
 interface DashboardPageProps {
@@ -46,14 +62,36 @@ function formatBytes(bytes: number): string {
   return `${bytes} B`;
 }
 
+function formatDurationSec(totalSec: number): string {
+  const s = Math.max(0, Math.round(totalSec));
+  const h = Math.floor(s / 3600);
+  const m = Math.floor((s % 3600) / 60);
+  const rem = s % 60;
+  if (h > 0) {
+    return `${h}:${String(m).padStart(2, "0")}:${String(rem).padStart(2, "0")}`;
+  }
+  return `${m}:${String(rem).padStart(2, "0")}`;
+}
+
+function parseClockToSec(raw: string): number | undefined {
+  const cleaned = raw.trim();
+  if (!cleaned) return undefined;
+  const parts = cleaned.split(":").map((p) => Number(p.trim()));
+  if (parts.some((n) => Number.isNaN(n) || n < 0)) return undefined;
+  if (parts.length === 3) return parts[0] * 3600 + parts[1] * 60 + parts[2];
+  if (parts.length === 2) return parts[0] * 60 + parts[1];
+  if (parts.length === 1) return parts[0];
+  return undefined;
+}
+
 function HypeSparkline({ points }: { points: HypeCurvePoint[] }) {
   if (points.length < 2) return null;
-  const width = 180;
-  const height = 28;
+  const width = 164;
+  const height = 26;
   const pathData = points
     .map((pt, idx) => {
       const x = (idx / Math.max(1, points.length - 1)) * width;
-      const y = height - Math.max(0.05, Math.min(1, pt.score)) * (height - 4) - 2;
+      const y = height - Math.max(0.06, Math.min(1, pt.score)) * (height - 4) - 2;
       return `${idx === 0 ? "M" : "L"}${x.toFixed(1)},${y.toFixed(1)}`;
     })
     .join(" ");
@@ -63,14 +101,14 @@ function HypeSparkline({ points }: { points: HypeCurvePoint[] }) {
       width={width}
       height={height}
       viewBox={`0 0 ${width} ${height}`}
-      className="overflow-visible rounded bg-[#0B0D12] px-1"
-      aria-label="Hype Curve"
+      className="overflow-visible rounded border border-[#222228] bg-[#09090B] px-1"
+      aria-label="Energy Curve"
     >
       <path
         d={pathData}
         fill="none"
-        stroke="#10B981"
-        strokeWidth="1.6"
+        stroke="#F59E0B"
+        strokeWidth="1.5"
         strokeLinecap="round"
         strokeLinejoin="round"
       />
@@ -93,8 +131,26 @@ export function DashboardPage({
   onOpenProject,
 }: DashboardPageProps) {
   const fileInputRef = useRef<HTMLInputElement | null>(null);
+  const srtInputRef = useRef<HTMLInputElement | null>(null);
   const [isDragging, setIsDragging] = useState(false);
+  const [sidecarSubFile, setSidecarSubFile] = useState<File | null>(null);
+
   const [urlInput, setUrlInput] = useState("");
+  const [probing, setProbing] = useState(false);
+  const [probeInfo, setProbeInfo] = useState<UrlProbeResponse | null>(null);
+  const [vodMode, setVodMode] = useState<"full" | "window">("full");
+  const [windowStartStr, setWindowStartStr] = useState("00:00");
+  const [windowEndStr, setWindowEndStr] = useState("15:00");
+
+  // Multi-clip Theme Mashup state
+  const [selectedMashupIds, setSelectedMashupIds] = useState<string[]>([]);
+  const [showMashupBar, setShowMashupBar] = useState(false);
+  const [mashupTitle, setMashupTitle] = useState("Cinema Dark Realizations");
+  const [mashupHook, setMashupHook] = useState("POV: WHEN REALITY HITS");
+  const [mashupTransition, setMashupTransition] = useState<"flash_white" | "dip_black">(
+    "flash_white",
+  );
+
   const [busyMessage, setBusyMessage] = useState<string | null>(null);
   const [errorBanner, setErrorBanner] = useState<string | null>(null);
   const [noticeBanner, setNoticeBanner] = useState<string | null>(null);
@@ -102,10 +158,15 @@ export function DashboardPage({
   async function handleFileUpload(file: File) {
     setErrorBanner(null);
     setNoticeBanner(null);
-    setBusyMessage(`Uploading ${file.name}...`);
+    setBusyMessage(`Ingesting ${file.name}...`);
     try {
-      const res = await transport.uploadVideo(file, selectedProfileId || undefined);
-      setNoticeBanner(`Queued "${res.source.title}" for automatic clipping.`);
+      const res = await transport.uploadVideo(
+        file,
+        selectedProfileId || undefined,
+        sidecarSubFile,
+      );
+      setSidecarSubFile(null);
+      setNoticeBanner(`Queued "${res.source.title}" for zero-touch clipping.`);
       if (res.job) onJobStarted(res.job);
       await onRefreshAll();
     } catch (err) {
@@ -118,8 +179,33 @@ export function DashboardPage({
   function onDrop(e: DragEvent<HTMLDivElement>) {
     e.preventDefault();
     setIsDragging(false);
-    const file = e.dataTransfer.files?.[0];
-    if (file) void handleFileUpload(file);
+    const files = Array.from(e.dataTransfer.files ?? []);
+    const sub = files.find((f) => /\.(srt|vtt|ass)$/i.test(f.name));
+    const vid = files.find((f) => /\.(mp4|mov|mkv|webm|m4v|avi)$/i.test(f.name)) ?? files[0];
+    if (sub) setSidecarSubFile(sub);
+    if (vid && !/\.(srt|vtt|ass)$/i.test(vid.name)) {
+      void handleFileUpload(vid);
+    }
+  }
+
+  async function handleProbeUrl(rawUrl?: string) {
+    const cleaned = (rawUrl ?? urlInput).trim();
+    if (!cleaned) return;
+    setErrorBanner(null);
+    setProbing(true);
+    try {
+      const meta = await transport.probeUrl(cleaned);
+      setProbeInfo(meta);
+      if (meta.durationS >= 3600) {
+        setWindowStartStr("00:00");
+        setWindowEndStr("20:00");
+      }
+    } catch (err) {
+      setProbeInfo(null);
+      setErrorBanner(err instanceof Error ? err.message : String(err));
+    } finally {
+      setProbing(false);
+    }
   }
 
   async function handleUrlSubmit(e: FormEvent) {
@@ -128,11 +214,28 @@ export function DashboardPage({
     if (!cleaned) return;
     setErrorBanner(null);
     setNoticeBanner(null);
-    setBusyMessage("Validating URL & starting download...");
+
+    const startSec = vodMode === "window" ? parseClockToSec(windowStartStr) : undefined;
+    const endSec = vodMode === "window" ? parseClockToSec(windowEndStr) : undefined;
+    if (vodMode === "window" && (startSec === undefined || endSec === undefined || endSec <= startSec)) {
+      setErrorBanner("Enter a valid Start and End time window (e.g. 12:00 to 28:00).");
+      return;
+    }
+
+    setBusyMessage(
+      vodMode === "window"
+        ? `Clipping VOD window (${windowStartStr}–${windowEndStr})...`
+        : "Starting 8× parallel VOD ingest...",
+    );
     try {
-      const res = await transport.ingestUrl(cleaned, selectedProfileId || undefined);
+      const res = await transport.ingestUrl(cleaned, selectedProfileId || undefined, {
+        title: probeInfo?.title,
+        startSec,
+        endSec,
+      });
       setUrlInput("");
-      setNoticeBanner(`Queued URL ingest for "${res.source.title}".`);
+      setProbeInfo(null);
+      setNoticeBanner(`Queued "${res.source.title}" in pipeline.`);
       if (res.job) onJobStarted(res.job);
       await onRefreshAll();
     } catch (err) {
@@ -142,15 +245,48 @@ export function DashboardPage({
     }
   }
 
+  async function handleCompileMashup() {
+    if (selectedMashupIds.length < 2) {
+      setErrorBanner("Select at least 2 clips below to compile a Theme Mashup.");
+      return;
+    }
+    setErrorBanner(null);
+    setBusyMessage(`Compiling ${selectedMashupIds.length}-clip Theme Mashup...`);
+    try {
+      const created = await transport.createMashup({
+        projectIds: selectedMashupIds,
+        title: mashupTitle,
+        povHook: mashupHook,
+        profileId: selectedProfileId || undefined,
+        transitionStyle: mashupTransition,
+        transitionSfx: mashupTransition === "flash_white" ? "whoosh_flash" : "cinema_hit",
+      });
+      setSelectedMashupIds([]);
+      setShowMashupBar(false);
+      await onRefreshAll();
+      onOpenProject(created.id);
+    } catch (err) {
+      setErrorBanner(err instanceof Error ? err.message : String(err));
+    } finally {
+      setBusyMessage(null);
+    }
+  }
+
+  function toggleMashupSelect(id: string) {
+    setSelectedMashupIds((prev) =>
+      prev.includes(id) ? prev.filter((x) => x !== id) : [...prev, id],
+    );
+  }
+
   async function handleScanInbox() {
     setErrorBanner(null);
-    setBusyMessage("Scanning inbox drop-folders...");
+    setBusyMessage("Scanning watch folders...");
     try {
       const res = await transport.scanInbox(selectedProfileId || undefined);
       setNoticeBanner(
         res.count > 0
-          ? `Ingested ${res.count} video(s) from inbox folders.`
-          : "No new videos found in inbox drop-folders.",
+          ? `Ingested ${res.count} media file(s) from watch folders.`
+          : "Watch folders are up to date.",
       );
       await onRefreshAll();
     } catch (err) {
@@ -162,13 +298,13 @@ export function DashboardPage({
 
   async function handlePollFeed() {
     setErrorBanner(null);
-    setBusyMessage("Checking followed creator channels...");
+    setBusyMessage("Polling followed creator channels...");
     try {
       const res = await transport.pollFeed();
       setNoticeBanner(
         res.count > 0
-          ? `Found ${res.count} new video(s) from followed creators.`
-          : "Smart Feed is up to date.",
+          ? `Discovered ${res.count} new broadcast(s).`
+          : "Channel feed is up to date.",
       );
       await onRefreshAll();
     } catch (err) {
@@ -183,7 +319,7 @@ export function DashboardPage({
     try {
       const res = await transport.archiveSource(sourceId);
       setNoticeBanner(
-        `Archived raw VOD (${formatBytes(res.reclaimedBytes)} reclaimed). All clip slices stay editable.`,
+        `Archived raw source (${formatBytes(res.reclaimedBytes)} freed). Lossless clip slices remain editable.`,
       );
       await onRefreshAll();
     } catch (err) {
@@ -193,91 +329,116 @@ export function DashboardPage({
 
   const activeFeed = feedItems.filter((f) => f.status === "new");
   const unarchivedSources = sources.filter((s) => !s.archived && s.durationMs > 0);
+  const typedPlatform = detectPlatformFromUrl(urlInput);
+  const activeProfile = profiles.find((p) => p.id === selectedProfileId);
 
   return (
     <div className="h-full overflow-y-auto px-6 py-5">
-      <div className="mx-auto max-w-6xl space-y-6">
-        {/* Top Row: Profile Selector + Quick Actions + Storage */}
-        <div className="flex flex-wrap items-center justify-between gap-3">
+      <div className="mx-auto max-w-6xl space-y-5">
+        {/* Studio Header & Active Profile Selector */}
+        <div className="flex flex-wrap items-center justify-between gap-3 border-b border-[#222228] pb-3.5">
           <div>
-            <h1 className="text-lg font-semibold tracking-tight">
-              AutoClip Studio Dashboard
+            <h1 className="text-base font-semibold tracking-tight text-[#F4F4F5]">
+              Media &amp; Ingest Pipeline
             </h1>
-            <p className="text-xs text-[#94A3B8]">
-              Drop a VOD or paste a YouTube / Kick / Twitch link to generate editable viral clips.
+            <p className="mt-0.5 text-xs text-[#A1A1AA]">
+              Drop local <span className="tabular-tc text-[#D4D4D8]">.mkv / .mp4</span> files or
+              ingest Twitch, YouTube &amp; Kick VODs into non-destructive zero-touch timelines.
             </p>
           </div>
 
           <div className="flex flex-wrap items-center gap-2">
-            <select
-              aria-label="Active Creator Profile"
+            <StudioSelect
+              ariaLabel="Active Creator Profile"
               value={selectedProfileId}
-              onChange={(e) => onSelectProfileId(e.target.value)}
-              className="min-w-[210px] rounded-md border border-[#222836] bg-[#131720] px-3 py-1.5 text-xs font-medium text-white focus:border-[#6366F1] focus:outline-none"
-            >
-              {profiles.map((p) => (
-                <option key={p.id} value={p.id}>
-                  Profile: {p.name}
-                </option>
-              ))}
-            </select>
+              onChange={onSelectProfileId}
+              className="min-w-[285px]"
+              options={profiles.map((p) => ({
+                value: p.id,
+                label: p.name,
+                hint: `${(p.default_ratio ?? "9:16").toUpperCase()} · ${p.caption_style}`,
+              }))}
+            />
 
             <button
               type="button"
               onClick={() => void handleScanInbox()}
               disabled={Boolean(busyMessage)}
-              className="inline-flex items-center gap-1.5 rounded-md border border-[#222836] bg-[#131720] px-2.5 py-1.5 text-xs font-medium text-[#CBD5E1] hover:border-[#2E374A] hover:text-white disabled:opacity-50"
+              className="inline-flex items-center gap-1.5 rounded-md border border-[#222228] bg-[#111114] px-2.5 py-1.5 text-xs font-medium text-[#D4D4D8] transition-colors hover:border-[#32323B] hover:text-white disabled:opacity-45"
             >
-              <FolderSearch className="h-3.5 w-3.5 text-[#38BDF8]" />
-              Scan Inbox
+              <FolderOpen className="h-3.5 w-3.5 text-[#A1A1AA]" />
+              Watch Folders
             </button>
 
             <button
               type="button"
               onClick={() => void handlePollFeed()}
               disabled={Boolean(busyMessage)}
-              className="inline-flex items-center gap-1.5 rounded-md border border-[#222836] bg-[#131720] px-2.5 py-1.5 text-xs font-medium text-[#CBD5E1] hover:border-[#2E374A] hover:text-white disabled:opacity-50"
+              className="inline-flex items-center gap-1.5 rounded-md border border-[#222228] bg-[#111114] px-2.5 py-1.5 text-xs font-medium text-[#D4D4D8] transition-colors hover:border-[#32323B] hover:text-white disabled:opacity-45"
             >
-              <Radio className="h-3.5 w-3.5 text-[#10B981]" />
-              Check Channels
+              <Broadcast className="h-3.5 w-3.5 text-[#A1A1AA]" />
+              Poll Channels
             </button>
 
             {storage && (
-              <div className="tabular-tc inline-flex items-center gap-1.5 rounded-md border border-[#222836] bg-[#131720] px-2.5 py-1.5 text-[11px] text-[#94A3B8]">
-                <HardDrive className="h-3.5 w-3.5 text-[#8B5CF6]" />
-                {formatBytes(storage.mediaBytes + storage.workBytes)} used ·{" "}
+              <div className="tabular-tc inline-flex items-center gap-1.5 rounded-md border border-[#222228] bg-[#111114] px-2.5 py-1.5 text-[11px] text-[#A1A1AA]">
+                <HardDrives className="h-3.5 w-3.5 text-[#71717A]" />
+                {formatBytes(storage.mediaBytes + storage.workBytes)} ·{" "}
                 {formatBytes(storage.diskFreeBytes)} free
               </div>
             )}
           </div>
         </div>
 
-        {/* Feedback Banners */}
+        {/* Status & Error Banners */}
         {busyMessage && (
-          <div className="flex items-center gap-2 rounded-lg border border-[#6366F1]/40 bg-[#6366F1]/10 px-3 py-2 text-xs text-[#E0E7FF]">
-            <Loader2 className="h-3.5 w-3.5 animate-spin" />
-            {busyMessage}
+          <div className="flex items-center gap-2 rounded-md border border-[#F59E0B]/40 bg-[#F59E0B]/10 px-3 py-2 text-xs text-[#FDE68A]">
+            <CircleNotch className="h-3.5 w-3.5 animate-spin text-[#F59E0B]" />
+            <span>{busyMessage}</span>
           </div>
         )}
         {errorBanner && (
-          <div className="flex items-center justify-between rounded-lg border border-[#F43F5E]/40 bg-[#F43F5E]/10 px-3 py-2 text-xs text-[#FECDD3]">
-            <span>{errorBanner}</span>
-            <button type="button" onClick={() => setErrorBanner(null)}>
-              <X className="h-3.5 w-3.5" />
-            </button>
+          <div className="flex flex-wrap items-center justify-between gap-2 rounded-md border border-[#EF4444]/40 bg-[#EF4444]/10 px-3 py-2 text-xs text-[#FECACA]">
+            <div className="flex items-center gap-2">
+              <WarningCircle className="h-4 w-4 shrink-0 text-[#EF4444]" />
+              <span>{errorBanner}</span>
+            </div>
+            <div className="flex items-center gap-2">
+              {errorBanner.toLowerCase().includes(".mkv") && (
+                <button
+                  type="button"
+                  onClick={() => fileInputRef.current?.click()}
+                  className="rounded border border-[#FECACA]/40 bg-[#09090B] px-2 py-0.5 text-[11px] font-medium text-[#F4F4F5] hover:border-white"
+                >
+                  Browse Local .MKV / .MP4
+                </button>
+              )}
+              <button
+                type="button"
+                aria-label="Dismiss error"
+                onClick={() => setErrorBanner(null)}
+              >
+                <X className="h-3.5 w-3.5" />
+              </button>
+            </div>
           </div>
         )}
         {noticeBanner && (
-          <div className="flex items-center justify-between rounded-lg border border-[#10B981]/40 bg-[#10B981]/10 px-3 py-2 text-xs text-[#D1FAE5]">
+          <div className="flex items-center justify-between rounded-md border border-[#22C55E]/35 bg-[#22C55E]/10 px-3 py-2 text-xs text-[#DCFCE7]">
             <span>{noticeBanner}</span>
-            <button type="button" onClick={() => setNoticeBanner(null)}>
+            <button
+              type="button"
+              aria-label="Dismiss notice"
+              onClick={() => setNoticeBanner(null)}
+            >
               <X className="h-3.5 w-3.5" />
             </button>
           </div>
         )}
 
-        {/* Ingest Grid: Drag-and-Drop Zone + URL Paste Bar */}
-        <div className="grid gap-4 lg:grid-cols-2">
+        {/* Unified Command Ingest Console */}
+        <div className="grid gap-3 lg:grid-cols-12">
+          {/* Left: Local File & Cinema MKV + SRT Drop Bay (5 cols) */}
           <div
             onDragOver={(e) => {
               e.preventDefault();
@@ -285,18 +446,29 @@ export function DashboardPage({
             }}
             onDragLeave={() => setIsDragging(false)}
             onDrop={onDrop}
-            onClick={() => fileInputRef.current?.click()}
-            role="button"
-            tabIndex={0}
-            onKeyDown={(e) => {
-              if (e.key === "Enter" || e.key === " ") fileInputRef.current?.click();
-            }}
-            className={`flex cursor-pointer flex-col items-center justify-center rounded-xl border-2 border-dashed p-6 text-center transition-colors ${
+            className={`flex flex-col justify-between rounded-lg border p-4 transition-colors lg:col-span-5 ${
               isDragging
-                ? "border-[#6366F1] bg-[#6366F1]/10"
-                : "border-[#222836] bg-[#131720] hover:border-[#38445E]"
+                ? "border-[#F59E0B] bg-[#F59E0B]/8"
+                : "border-[#222228] bg-[#111114] hover:border-[#32323B]"
             }`}
           >
+            <div>
+              <div className="flex items-center justify-between">
+                <span className="inline-flex items-center gap-1.5 text-xs font-semibold text-[#F4F4F5]">
+                  <UploadSimple className="h-4 w-4 text-[#F59E0B]" />
+                  Local Media &amp; Cinema MKV Ingest
+                </span>
+                <span className="tabular-tc text-[10px] text-[#71717A]">
+                  5.1 FC · EMBEDDED SRT
+                </span>
+              </div>
+              <p className="mt-1 text-[11px] leading-relaxed text-[#A1A1AA]">
+                Drop a movie <span className="tabular-tc text-[#D4D4D8]">.mkv</span>, stream
+                recording, or <span className="tabular-tc text-[#D4D4D8]">.mp4</span>. Embedded
+                subtitles extract in &lt;0.5s and 5.1 surround isolates center-channel dialogue.
+              </p>
+            </div>
+
             <input
               ref={fileInputRef}
               type="file"
@@ -308,153 +480,323 @@ export function DashboardPage({
                 e.target.value = "";
               }}
             />
-            <FolderUp className="h-8 w-8 text-[#6366F1]" />
-            <p className="mt-2.5 text-sm font-semibold">
-              Drop Video File or Click to Upload
-            </p>
-            <p className="mt-1 text-xs text-[#94A3B8]">
-              MP4, MOV, MKV, WebM — auto-runs Hype Curve, Whisper, Highlights, and Lossless Slices
-            </p>
-          </div>
+            <input
+              ref={srtInputRef}
+              type="file"
+              accept=".srt,.vtt,.ass"
+              className="hidden"
+              onChange={(e) => {
+                const picked = e.target.files?.[0] ?? null;
+                setSidecarSubFile(picked);
+                e.target.value = "";
+              }}
+            />
 
-          <form
-            onSubmit={(e) => void handleUrlSubmit(e)}
-            className="flex flex-col justify-between rounded-xl border border-[#222836] bg-[#131720] p-6"
-          >
-            <div>
-              <div className="flex items-center gap-2 text-sm font-semibold">
-                <Link2 className="h-4 w-4 text-[#38BDF8]" />
-                Multi-Platform URL Ingest
-              </div>
-              <p className="mt-1 text-xs text-[#94A3B8]">
-                Paste a YouTube, Kick, Twitch, TikTok, or X link. YouTube heatmaps fuse directly
-                into the Multi-Signal Hype Curve.
-              </p>
-            </div>
-            <div className="mt-4 flex items-center gap-2">
-              <input
-                type="url"
-                value={urlInput}
-                onChange={(e) => setUrlInput(e.target.value)}
-                placeholder="https://www.youtube.com/watch?v=..."
-                className="min-w-0 flex-1 rounded-md border border-[#222836] bg-[#0B0D12] px-3 py-2 text-xs text-white placeholder-[#64748B] focus:border-[#6366F1] focus:outline-none"
-              />
+            <div className="mt-3.5 flex flex-wrap items-center gap-2">
               <button
-                type="submit"
-                disabled={Boolean(busyMessage) || !urlInput.trim()}
-                className="inline-flex items-center gap-1.5 rounded-md bg-[#6366F1] px-3.5 py-2 text-xs font-semibold text-white hover:bg-[#5558E6] disabled:opacity-45"
+                type="button"
+                onClick={() => fileInputRef.current?.click()}
+                disabled={Boolean(busyMessage)}
+                className="inline-flex flex-1 items-center justify-center gap-1.5 rounded-md border border-[#32323B] bg-[#18181C] px-3 py-1.5 text-xs font-medium text-[#F4F4F5] transition-colors hover:border-[#F59E0B]/60 hover:bg-[#202026] disabled:opacity-45"
               >
-                <Sparkles className="h-3.5 w-3.5" />
-                Clip Now
+                <FilmStrip className="h-3.5 w-3.5 text-[#F59E0B]" />
+                Select Video (.MP4 / .MKV)
+              </button>
+
+              <button
+                type="button"
+                onClick={() => srtInputRef.current?.click()}
+                title="Optional sidecar .srt/.vtt/.ass subtitle file"
+                className={`inline-flex items-center gap-1 rounded-md border px-2.5 py-1.5 text-xs transition-colors ${
+                  sidecarSubFile
+                    ? "border-[#F59E0B]/60 bg-[#F59E0B]/12 text-[#FDE68A]"
+                    : "border-[#222228] bg-[#09090B] text-[#A1A1AA] hover:border-[#32323B] hover:text-[#F4F4F5]"
+                }`}
+              >
+                <Subtitles className="h-3.5 w-3.5" />
+                {sidecarSubFile ? sidecarSubFile.name.slice(0, 16) : "+ Sidecar .SRT"}
               </button>
             </div>
+          </div>
+
+          {/* Right: Multi-Platform & Twitch Long-VOD Command Bar (7 cols) */}
+          <form
+            onSubmit={(e) => void handleUrlSubmit(e)}
+            className="flex flex-col justify-between rounded-lg border border-[#222228] bg-[#111114] p-4 lg:col-span-7"
+          >
+            <div className="space-y-2.5">
+              <div className="flex flex-wrap items-center justify-between gap-2">
+                <span className="text-xs font-semibold text-[#F4F4F5]">
+                  Twitch VOD &amp; Multi-Platform Stream Ingest
+                </span>
+                <div className="flex items-center gap-2.5 text-[#71717A]">
+                  <TwitchIcon className="h-3.5 w-3.5 text-[#A970FF]" title="Twitch VODs & Clips" />
+                  <YouTubeIcon className="h-3.5 w-3.5 text-[#FF4E45]" title="YouTube" />
+                  <KickIcon className="h-3 w-3 text-[#53FC18]" title="Kick" />
+                  <TikTokIcon className="h-3.5 w-3.5 text-[#D4D4D8]" title="TikTok" />
+                  <XBrandIcon className="h-3 w-3 text-[#D4D4D8]" title="X / Twitter" />
+                </div>
+              </div>
+
+              <div className="flex items-center gap-2">
+                <div className="relative flex min-w-0 flex-1 items-center">
+                  {typedPlatform !== "local" && typedPlatform !== "web" && (
+                    <span className="pointer-events-none absolute left-2.5">
+                      <PlatformMark platform={typedPlatform} className="h-3.5 w-3.5" />
+                    </span>
+                  )}
+                  <input
+                    type="url"
+                    value={urlInput}
+                    onChange={(e) => {
+                      setUrlInput(e.target.value);
+                      if (!e.target.value.trim()) setProbeInfo(null);
+                    }}
+                    placeholder="https://www.twitch.tv/videos/... or https://youtube.com/watch?v=..."
+                    className={`w-full rounded-md border border-[#222228] bg-[#09090B] py-1.5 pr-3 text-xs text-[#F4F4F5] placeholder-[#71717A] focus:border-[#F59E0B] focus:outline-none ${
+                      typedPlatform !== "local" && typedPlatform !== "web" ? "pl-8" : "pl-3"
+                    }`}
+                  />
+                </div>
+
+                <button
+                  type="button"
+                  disabled={probing || !urlInput.trim()}
+                  onClick={() => void handleProbeUrl()}
+                  title="Inspect VOD duration & chapters before downloading"
+                  className="inline-flex items-center gap-1 rounded-md border border-[#2C2C35] bg-[#18181C] px-2.5 py-1.5 text-xs font-medium text-[#D4D4D8] hover:border-[#3F3F46] hover:text-white disabled:opacity-40"
+                >
+                  {probing ? (
+                    <CircleNotch className="h-3.5 w-3.5 animate-spin" />
+                  ) : (
+                    <MagnifyingGlass className="h-3.5 w-3.5" />
+                  )}
+                  Inspect
+                </button>
+
+                <button
+                  type="submit"
+                  disabled={Boolean(busyMessage) || !urlInput.trim()}
+                  className="inline-flex items-center gap-1.5 rounded-md bg-[#F59E0B] px-3.5 py-1.5 text-xs font-semibold text-[#09090B] transition-colors hover:bg-[#FBBF24] disabled:opacity-40"
+                >
+                  <Scissors weight="bold" className="h-3.5 w-3.5" />
+                  Clip VOD
+                </button>
+              </div>
+
+              {/* Probed VOD Metadata + Full VOD vs Time Window Selector */}
+              {(probeInfo || typedPlatform === "twitch") && urlInput.trim() && (
+                <div className="space-y-2.5 rounded-md border border-[#27272F] bg-[#09090B] p-2.5">
+                  {probeInfo && (
+                    <div className="flex items-center justify-between gap-2 text-xs">
+                      <div className="flex min-w-0 items-center gap-2">
+                        <PlatformMark platform={probeInfo.platform} className="h-3.5 w-3.5 shrink-0" />
+                        <span className="truncate font-medium text-[#F4F4F5]">
+                          {probeInfo.title}
+                        </span>
+                      </div>
+                      <span className="tabular-tc shrink-0 text-[11px] text-[#A1A1AA]">
+                        {probeInfo.channel ? `${probeInfo.channel} · ` : ""}
+                        {formatDurationSec(probeInfo.durationS)}
+                      </span>
+                    </div>
+                  )}
+
+                  <div className="grid gap-2 sm:grid-cols-12 sm:items-center">
+                    <div className="sm:col-span-6">
+                      <SegmentedControl
+                        size="xs"
+                        value={vodMode}
+                        onChange={setVodMode}
+                        options={[
+                          { value: "full", label: "Full VOD (8× Parallel)" },
+                          { value: "window", label: "Time Window (Fast)" },
+                        ]}
+                      />
+                    </div>
+
+                    {vodMode === "window" ? (
+                      <div className="flex items-center gap-1.5 sm:col-span-6">
+                        <input
+                          type="text"
+                          value={windowStartStr}
+                          onChange={(e) => setWindowStartStr(e.target.value)}
+                          aria-label="Start time"
+                          placeholder="00:00"
+                          className="tabular-tc w-full rounded border border-[#222228] bg-[#111114] px-2 py-1 text-center text-[11px] text-[#F4F4F5] focus:border-[#F59E0B] focus:outline-none"
+                        />
+                        <span className="text-[11px] text-[#71717A]">to</span>
+                        <input
+                          type="text"
+                          value={windowEndStr}
+                          onChange={(e) => setWindowEndStr(e.target.value)}
+                          aria-label="End time"
+                          placeholder="20:00"
+                          className="tabular-tc w-full rounded border border-[#222228] bg-[#111114] px-2 py-1 text-center text-[11px] text-[#F4F4F5] focus:border-[#F59E0B] focus:outline-none"
+                        />
+                      </div>
+                    ) : (
+                      <div className="text-[11px] text-[#71717A] sm:col-span-6">
+                        Downloads 8 HLS fragments concurrently &amp; scans full broadcast.
+                      </div>
+                    )}
+                  </div>
+
+                  {probeInfo && probeInfo.chapters.length > 0 && (
+                    <div className="flex flex-wrap items-center gap-1 pt-0.5">
+                      <span className="text-[10px] text-[#71717A]">Chapters:</span>
+                      {probeInfo.chapters.slice(0, 5).map((ch, idx) => (
+                        <button
+                          key={`${ch.title}-${idx}`}
+                          type="button"
+                          onClick={() => {
+                            setVodMode("window");
+                            setWindowStartStr(formatDurationSec(ch.startS));
+                            setWindowEndStr(formatDurationSec(ch.endS));
+                          }}
+                          className="rounded border border-[#222228] bg-[#141418] px-1.5 py-0.5 text-[10px] text-[#D4D4D8] hover:border-[#F59E0B]/50 hover:text-white"
+                        >
+                          {ch.title} ({formatDurationSec(ch.startS)})
+                        </button>
+                      ))}
+                    </div>
+                  )}
+                </div>
+              )}
+            </div>
+
+            {activeProfile && (
+              <div className="mt-2.5 flex items-center justify-between border-t border-[#1C1C22] pt-2 text-[11px] text-[#71717A]">
+                <span>
+                  Preset:{" "}
+                  <strong className="font-medium text-[#D4D4D8]">{activeProfile.name}</strong>
+                </span>
+                <span className="tabular-tc">
+                  {(activeProfile.default_ratio ?? "9:16").toUpperCase()} ·{" "}
+                  {activeProfile.bgm_mode && activeProfile.bgm_mode !== "off"
+                    ? "Auto-Ducked BGM"
+                    : "Clean Dialogue"}
+                </span>
+              </div>
+            )}
           </form>
         </div>
 
-        {/* Smart Feed ("New From Followed Creators") */}
+        {/* Followed Creator Feed */}
         {activeFeed.length > 0 && (
-          <section className="space-y-2.5">
-            <h2 className="text-xs font-semibold uppercase tracking-wider text-[#94A3B8]">
-              New From Followed Creators ({activeFeed.length})
+          <section className="space-y-2">
+            <h2 className="text-[11px] font-semibold uppercase tracking-wider text-[#71717A]">
+              Followed Creator Feed ({activeFeed.length})
             </h2>
-            <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-3">
-              {activeFeed.map((item) => (
-                <div
-                  key={item.id}
-                  className="flex flex-col justify-between rounded-lg border border-[#222836] bg-[#131720] p-3"
-                >
-                  <div>
-                    <div className="line-clamp-2 text-xs font-semibold">{item.title}</div>
-                    <div className="mt-1 text-[11px] text-[#94A3B8]">
-                      {item.channel || item.profileId}
+            <div className="grid gap-2.5 sm:grid-cols-2 lg:grid-cols-3">
+              {activeFeed.map((item) => {
+                const plat = detectPlatformFromUrl(item.url);
+                return (
+                  <div
+                    key={item.id}
+                    className="flex flex-col justify-between rounded-lg border border-[#222228] bg-[#111114] p-3"
+                  >
+                    <div>
+                      <div className="flex items-center gap-1.5 text-[11px] text-[#A1A1AA]">
+                        <PlatformMark platform={plat} className="h-3 w-3" />
+                        <span className="truncate">{item.channel || item.profileId}</span>
+                      </div>
+                      <div className="mt-1 line-clamp-2 text-xs font-semibold text-[#F4F4F5]">
+                        {item.title}
+                      </div>
+                    </div>
+                    <div className="mt-3 flex items-center gap-2">
+                      <button
+                        type="button"
+                        onClick={async () => {
+                          const res = await transport.clipFeedItem(item.id);
+                          if (res.job) onJobStarted(res.job);
+                          await onRefreshAll();
+                        }}
+                        className="flex-1 rounded bg-[#F59E0B] px-2.5 py-1 text-xs font-semibold text-[#09090B] hover:bg-[#FBBF24]"
+                      >
+                        Clip VOD
+                      </button>
+                      <button
+                        type="button"
+                        onClick={async () => {
+                          await transport.dismissFeedItem(item.id);
+                          await onRefreshAll();
+                        }}
+                        className="rounded border border-[#222228] px-2 py-1 text-xs text-[#A1A1AA] hover:text-white"
+                      >
+                        Dismiss
+                      </button>
                     </div>
                   </div>
-                  <div className="mt-3 flex items-center gap-2">
-                    <button
-                      type="button"
-                      onClick={async () => {
-                        const res = await transport.clipFeedItem(item.id);
-                        if (res.job) onJobStarted(res.job);
-                        await onRefreshAll();
-                      }}
-                      className="flex-1 rounded bg-[#6366F1] px-2.5 py-1 text-xs font-medium text-white hover:bg-[#5558E6]"
-                    >
-                      Clip Now
-                    </button>
-                    <button
-                      type="button"
-                      onClick={async () => {
-                        await transport.dismissFeedItem(item.id);
-                        await onRefreshAll();
-                      }}
-                      className="rounded border border-[#222836] px-2 py-1 text-xs text-[#94A3B8] hover:text-white"
-                    >
-                      Dismiss
-                    </button>
-                  </div>
-                </div>
-              ))}
+                );
+              })}
             </div>
           </section>
         )}
 
-        {/* Active & Recent Jobs Rail */}
+        {/* Pipeline Jobs */}
         {jobs.length > 0 && (
-          <section className="space-y-2.5">
+          <section className="space-y-2">
             <div className="flex items-center justify-between">
-              <h2 className="text-xs font-semibold uppercase tracking-wider text-[#94A3B8]">
-                Pipeline Jobs ({jobs.length})
+              <h2 className="text-[11px] font-semibold uppercase tracking-wider text-[#71717A]">
+                Pipeline Telemetry ({jobs.length})
               </h2>
               <button
                 type="button"
                 onClick={() => void onRefreshAll()}
-                className="inline-flex items-center gap-1 text-[11px] text-[#94A3B8] hover:text-white"
+                className="inline-flex items-center gap-1 text-[11px] text-[#A1A1AA] hover:text-white"
               >
-                <RefreshCw className="h-3 w-3" />
+                <ArrowsClockwise className="h-3 w-3" />
                 Refresh
               </button>
             </div>
-            <div className="space-y-2">
+            <div className="space-y-1.5">
               {jobs.slice(0, 6).map((job) => {
                 const pct = Math.round(job.progress * 100);
-                const statusTone =
+                const statusBadge =
                   job.status === "done"
-                    ? "text-[#10B981] bg-[#10B981]/10 border-[#10B981]/30"
+                    ? "border-[#22C55E]/30 bg-[#22C55E]/10 text-[#4ADE80]"
                     : job.status === "failed"
-                      ? "text-[#F43F5E] bg-[#F43F5E]/10 border-[#F43F5E]/30"
-                      : "text-[#F59E0B] bg-[#F59E0B]/10 border-[#F59E0B]/30";
+                      ? "border-[#EF4444]/30 bg-[#EF4444]/10 text-[#F87171]"
+                      : "border-[#F59E0B]/30 bg-[#F59E0B]/10 text-[#FBBF24]";
                 return (
                   <div
                     key={job.id}
-                    className="flex flex-wrap items-center justify-between gap-4 rounded-lg border border-[#222836] bg-[#131720] px-4 py-2.5"
+                    className="flex flex-wrap items-center justify-between gap-4 rounded-lg border border-[#222228] bg-[#111114] px-3.5 py-2.5"
                   >
                     <div className="min-w-0 flex-1">
                       <div className="flex items-center gap-2">
-                        <span className="truncate text-xs font-semibold">
+                        <span className="truncate text-xs font-medium text-[#F4F4F5]">
                           {job.sourceTitle || job.sourceId}
                         </span>
                         <span
-                          className={`rounded-full border px-2 py-0.5 text-[10px] font-medium uppercase ${statusTone}`}
+                          className={`tabular-tc rounded border px-1.5 py-0.5 text-[10px] font-medium uppercase ${statusBadge}`}
                         >
                           {job.stage}
                         </span>
+                        {job.downloadDetail && job.status === "running" && (
+                          <span className="tabular-tc text-[10px] text-[#A1A1AA]">
+                            {job.downloadDetail}
+                          </span>
+                        )}
                       </div>
-                      <div className="mt-1.5 h-1.5 w-full overflow-hidden rounded-full bg-[#0B0D12]">
+                      <div className="mt-1.5 h-1 w-full overflow-hidden rounded-full bg-[#09090B]">
                         <div
-                          className="h-full rounded-full bg-[#6366F1] transition-all"
-                          style={{ width: `${Math.max(4, pct)}%` }}
+                          className="h-full rounded-full bg-[#F59E0B] transition-all"
+                          style={{ width: `${Math.max(3, pct)}%` }}
                         />
                       </div>
                       {job.error && (
-                        <p className="mt-1 text-[11px] text-[#FDA4AF]">{job.error}</p>
+                        <p className="mt-1 text-[11px] text-[#FCA5A5]">{job.error}</p>
                       )}
                     </div>
 
-                    <div className="flex items-center gap-4">
+                    <div className="flex items-center gap-3.5">
                       <HypeSparkline points={job.hypeCurve} />
-                      <div className="tabular-tc text-right text-[11px] text-[#94A3B8]">
-                        <div className="font-semibold text-white">{pct}%</div>
-                        <div>{job.clipCount} clip(s)</div>
+                      <div className="tabular-tc text-right text-[11px] text-[#A1A1AA]">
+                        <div className="font-semibold text-[#F4F4F5]">{pct}%</div>
+                        <div>{job.clipCount} clips</div>
                       </div>
                     </div>
                   </div>
@@ -464,45 +806,120 @@ export function DashboardPage({
           </section>
         )}
 
-        {/* Generated Clips Grid */}
+        {/* Generated Clips Library + Multi-Clip Theme Mashup Compiler */}
         <section className="space-y-3">
-          <div className="flex items-center justify-between">
-            <h2 className="text-xs font-semibold uppercase tracking-wider text-[#94A3B8]">
-              Generated Clips ({projects.length})
-            </h2>
+          <div className="flex flex-wrap items-center justify-between gap-2">
+            <div className="flex items-center gap-3">
+              <h2 className="text-[11px] font-semibold uppercase tracking-wider text-[#71717A]">
+                Generated Clips ({projects.length})
+              </h2>
+              {projects.length >= 2 && (
+                <button
+                  type="button"
+                  onClick={() => setShowMashupBar((v) => !v)}
+                  className={`inline-flex items-center gap-1.5 rounded border px-2 py-0.5 text-[11px] font-medium transition-colors ${
+                    showMashupBar || selectedMashupIds.length >= 2
+                      ? "border-[#F59E0B]/60 bg-[#F59E0B]/15 text-[#FDE68A]"
+                      : "border-[#222228] bg-[#111114] text-[#A1A1AA] hover:text-[#F4F4F5]"
+                  }`}
+                >
+                  <Intersect className="h-3.5 w-3.5" />
+                  Theme Mashup
+                  {selectedMashupIds.length > 0 && (
+                    <span className="tabular-tc">({selectedMashupIds.length})</span>
+                  )}
+                </button>
+              )}
+            </div>
+
             {unarchivedSources.length > 0 && (
-              <div className="flex items-center gap-2">
+              <div className="flex flex-wrap items-center gap-1.5">
                 {unarchivedSources.slice(0, 2).map((src) => (
                   <button
                     key={src.id}
                     type="button"
                     onClick={() => void handleArchiveSource(src.id)}
-                    className="inline-flex items-center gap-1 rounded border border-[#222836] bg-[#131720] px-2 py-1 text-[11px] text-[#94A3B8] hover:border-[#F59E0B]/50 hover:text-[#FDE68A]"
+                    className="inline-flex items-center gap-1 rounded border border-[#222228] bg-[#111114] px-2 py-1 text-[11px] text-[#A1A1AA] hover:border-[#3F3F46] hover:text-[#F4F4F5]"
                   >
                     <Archive className="h-3 w-3" />
-                    Archive Raw VOD ({src.title.slice(0, 18)})
+                    Reclaim Raw VOD ({src.title.slice(0, 18)})
                   </button>
                 ))}
               </div>
             )}
           </div>
 
+          {/* Theme Mashup Compiler Bar */}
+          {(showMashupBar || selectedMashupIds.length >= 2) && (
+            <div className="grid gap-2.5 rounded-lg border border-[#F59E0B]/35 bg-[#111114] p-3 sm:grid-cols-12 sm:items-end">
+              <div className="sm:col-span-3">
+                <label className="mb-1 block text-[10px] text-[#A1A1AA]">Mashup Title</label>
+                <input
+                  type="text"
+                  value={mashupTitle}
+                  onChange={(e) => setMashupTitle(e.target.value)}
+                  className="w-full rounded border border-[#222228] bg-[#09090B] px-2 py-1 text-xs text-[#F4F4F5] focus:border-[#F59E0B] focus:outline-none"
+                />
+              </div>
+              <div className="sm:col-span-4">
+                <label className="mb-1 block text-[10px] text-[#A1A1AA]">
+                  Top POV Header Hook
+                </label>
+                <input
+                  type="text"
+                  value={mashupHook}
+                  onChange={(e) => setMashupHook(e.target.value)}
+                  placeholder="POV: MOVIES SHOWING..."
+                  className="w-full rounded border border-[#222228] bg-[#09090B] px-2 py-1 text-xs text-[#F4F4F5] focus:border-[#F59E0B] focus:outline-none"
+                />
+              </div>
+              <div className="sm:col-span-3">
+                <label className="mb-1 block text-[10px] text-[#A1A1AA]">Cut Transition</label>
+                <SegmentedControl
+                  size="xs"
+                  value={mashupTransition}
+                  onChange={setMashupTransition}
+                  options={[
+                    { value: "flash_white", label: "White Flash" },
+                    { value: "dip_black", label: "Dip Black" },
+                  ]}
+                />
+              </div>
+              <div className="sm:col-span-2">
+                <button
+                  type="button"
+                  disabled={selectedMashupIds.length < 2 || Boolean(busyMessage)}
+                  onClick={() => void handleCompileMashup()}
+                  className="w-full rounded-md bg-[#F59E0B] px-2.5 py-1.5 text-xs font-semibold text-[#09090B] hover:bg-[#FBBF24] disabled:opacity-40"
+                >
+                  Compile ({selectedMashupIds.length})
+                </button>
+              </div>
+            </div>
+          )}
+
           {projects.length === 0 ? (
-            <div className="rounded-xl border border-[#222836] bg-[#131720] p-8 text-center text-xs text-[#94A3B8]">
-              No clips generated yet. Drop a video above to create your first viral clip batch.
+            <div className="rounded-lg border border-[#222228] bg-[#111114] p-8 text-center text-xs text-[#71717A]">
+              No clips in workspace yet. Drop a video or paste a VOD link above to generate
+              zero-touch timelines.
             </div>
           ) : (
-            <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-3">
+            <div className="grid gap-3.5 sm:grid-cols-2 lg:grid-cols-3">
               {projects.map((clip) => {
                 const thumbUrl = clip.hasThumb
                   ? transport.projectThumbUrl(clip.id)
                   : null;
+                const isPicked = selectedMashupIds.includes(clip.id);
                 return (
                   <article
                     key={clip.id}
-                    className="flex flex-col overflow-hidden rounded-xl border border-[#222836] bg-[#131720] transition-colors hover:border-[#6366F1]/60"
+                    className={`group flex flex-col overflow-hidden rounded-lg border bg-[#111114] transition-colors ${
+                      isPicked
+                        ? "border-[#F59E0B]"
+                        : "border-[#222228] hover:border-[#3A3A44]"
+                    }`}
                   >
-                    <div className="relative h-36 bg-gradient-to-br from-[#1E1B4B] via-[#131720] to-[#0F172A]">
+                    <div className="relative h-36 bg-[#09090B]">
                       {thumbUrl ? (
                         <img
                           src={thumbUrl}
@@ -510,41 +927,58 @@ export function DashboardPage({
                           className="h-full w-full object-cover"
                         />
                       ) : (
-                        <div className="flex h-full items-center justify-center text-xs text-[#64748B]">
-                          EDL v1 Draft Preview
+                        <div className="studio-stage-grid flex h-full flex-col items-center justify-center gap-1 text-[11px] text-[#71717A]">
+                          <FilmStrip className="h-5 w-5 text-[#52525B]" />
+                          <span className="tabular-tc">EDL v1 · READY</span>
                         </div>
                       )}
-                      <span className="tabular-tc absolute left-2.5 top-2.5 rounded-md bg-black/75 px-2 py-0.5 text-[11px] font-semibold text-[#10B981]">
-                        Score {clip.score}
-                      </span>
-                      <span className="tabular-tc absolute bottom-2.5 right-2.5 rounded-md bg-black/75 px-2 py-0.5 text-[11px] text-white">
+
+                      <div className="absolute left-2.5 top-2.5 flex items-center gap-1.5">
+                        <button
+                          type="button"
+                          onClick={() => toggleMashupSelect(clip.id)}
+                          title="Select clip for Theme Mashup"
+                          className="flex h-5 w-5 items-center justify-center rounded bg-black/80 text-[#D4D4D8] hover:text-white"
+                        >
+                          {isPicked ? (
+                            <CheckSquare weight="fill" className="h-4 w-4 text-[#F59E0B]" />
+                          ) : (
+                            <Square className="h-4 w-4" />
+                          )}
+                        </button>
+                        <span className="tabular-tc rounded border border-white/10 bg-black/80 px-1.5 py-0.5 text-[10px] font-semibold text-[#F59E0B]">
+                          SCORE {clip.score}
+                        </span>
+                      </div>
+
+                      <span className="tabular-tc absolute bottom-2 right-2 rounded border border-white/10 bg-black/80 px-1.5 py-0.5 text-[10px] text-[#F4F4F5]">
                         {formatTimecodeMs(clip.totalDurationMs)}
                       </span>
                     </div>
 
-                    <div className="flex flex-1 flex-col justify-between p-3.5">
+                    <div className="flex flex-1 flex-col justify-between p-3">
                       <div>
-                        <h3 className="line-clamp-2 text-xs font-semibold leading-snug text-white">
+                        <h3 className="line-clamp-2 text-xs font-semibold leading-snug text-[#F4F4F5]">
                           {clip.title}
                         </h3>
                         {clip.reason && (
-                          <p className="mt-1 line-clamp-2 text-[11px] text-[#94A3B8]">
+                          <p className="mt-1 line-clamp-2 text-[11px] text-[#A1A1AA]">
                             {clip.reason}
                           </p>
                         )}
                       </div>
 
-                      <div className="mt-3 flex items-center justify-between border-t border-[#222836] pt-2.5">
-                        <span className="text-[11px] text-[#64748B]">
+                      <div className="mt-3 flex items-center justify-between border-t border-[#1E1E24] pt-2.5">
+                        <span className="tabular-tc text-[10px] uppercase text-[#71717A]">
                           {clip.wordCount} words · {clip.status}
                         </span>
                         <button
                           type="button"
                           onClick={() => onOpenProject(clip.id)}
-                          className="inline-flex items-center gap-1 rounded-md bg-[#6366F1] px-2.5 py-1 text-xs font-medium text-white hover:bg-[#5558E6]"
+                          className="inline-flex items-center gap-1 rounded border border-[#2C2C35] bg-[#18181C] px-2.5 py-1 text-[11px] font-medium text-[#F4F4F5] transition-colors group-hover:border-[#F59E0B]/60 group-hover:bg-[#F59E0B] group-hover:text-[#09090B]"
                         >
-                          <Clapperboard className="h-3.5 w-3.5" />
-                          Open in Editor
+                          <Scissors className="h-3 w-3" />
+                          Cut Room
                         </button>
                       </div>
                     </div>

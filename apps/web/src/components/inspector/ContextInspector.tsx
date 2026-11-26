@@ -1,48 +1,78 @@
+import { useRef, useState } from "react";
 import {
-  Frame,
-  Layers,
-  Loader2,
-  Pin,
+  CircleNotch,
+  Export,
+  FrameCorners,
+  MusicNotesPlus,
   Plus,
-  Rocket,
-  SplitSquareVertical,
+  PushPin,
+  SpeakerHigh,
+  SplitVertical,
+  Stack,
   Subtitles,
-  Trash2,
-} from "lucide-react";
+  Trash,
+} from "@phosphor-icons/react";
 import {
   getActiveFramingAt,
   type NormalizedBox,
   type OutputSettings,
   type OverlayItem,
   type SubtitleStyle,
+  type VideoSlice,
 } from "../../edl";
 import {
   useTimelineStore,
   type InspectorContext,
 } from "../../state/timelineStore";
+import type { BgmAssetItem, StudioTransport } from "../../transport";
+import {
+  ScrubNumber,
+  ScrubSlider,
+  SegmentedControl,
+  StudioSelect,
+  StudioToggle,
+} from "../ui/StudioControls";
 
 interface ContextInspectorProps {
+  transport: StudioTransport;
+  bgmAssets: BgmAssetItem[];
+  onRefreshBgm: () => Promise<void>;
   canExport: boolean;
   exportingNow: boolean;
   onExportNow: () => Promise<void>;
+  onError: (msg: string) => void;
   onPinWebcam?: (camBox: NormalizedBox, splitRatio: number) => Promise<void>;
 }
 
 const INSPECTOR_TABS: {
   id: InspectorContext;
   label: string;
-  icon: typeof Frame;
+  icon: typeof FrameCorners;
 }[] = [
-  { id: "framing", label: "Framing", icon: Frame },
-  { id: "subtitle", label: "Subs", icon: Subtitles },
-  { id: "overlay", label: "Cards", icon: Layers },
-  { id: "export", label: "Export", icon: Rocket },
+  { id: "framing", label: "Frame", icon: FrameCorners },
+  { id: "audio", label: "Audio", icon: SpeakerHigh },
+  { id: "subtitle", label: "Captions", icon: Subtitles },
+  { id: "overlay", label: "Overlays", icon: Stack },
+  { id: "export", label: "Render", icon: Export },
+];
+
+const PUNCH_GLOW_SWATCHES = [
+  { label: "None", hex: "" },
+  { label: "Blue", hex: "#4F7CFF" },
+  { label: "Green", hex: "#4ADE80" },
+  { label: "Gold", hex: "#FBBF24" },
+  { label: "Coral", hex: "#F87171" },
+  { label: "Rose", hex: "#F472B6" },
 ];
 
 export function ContextInspector({
+  transport,
+  bgmAssets,
+  onRefreshBgm,
   canExport,
   exportingNow,
   onExportNow,
+  onError,
   onPinWebcam,
 }: ContextInspectorProps) {
   const {
@@ -51,11 +81,16 @@ export function ContextInspector({
     inspectorContext,
     selectedWordId,
     selectedOverlayId,
+    selectedClipId,
     lastActionLabel,
     setInspectorContext,
     selectOverlay,
+    selectClip,
     mutateEdl,
     updateFraming,
+    updateAudio,
+    updateBgm,
+    updateSliceTransition,
     splitFramingAtPlayhead,
     setWordTiming,
     setWordText,
@@ -64,6 +99,9 @@ export function ContextInspector({
     addOverlay,
     removeOverlay,
   } = useTimelineStore();
+
+  const bgmFileInputRef = useRef<HTMLInputElement | null>(null);
+  const [uploadingBgm, setUploadingBgm] = useState(false);
 
   if (!edl) return null;
 
@@ -74,11 +112,35 @@ export function ContextInspector({
     edl.tracks.overlays.find((o) => o.id === selectedOverlayId) ??
     edl.tracks.overlays[0] ??
     null;
+  const activeClip =
+    edl.tracks.video.clips.find((c) => c.id === selectedClipId) ??
+    edl.tracks.video.clips[0] ??
+    null;
+  const bgm = edl.tracks.audio.bgm ?? null;
+
+  async function handleBgmUpload(file: File) {
+    setUploadingBgm(true);
+    try {
+      const moodHint =
+        edl?.output.ratio === "1:1" ? "dark_cinema" : "upbeat_gaming";
+      const uploaded = await transport.uploadBgm(file, "", moodHint);
+      await onRefreshBgm();
+      updateBgm({
+        assetId: uploaded.id,
+        startOffsetMs: uploaded.dropOffsetMs,
+        duckingEnabled: true,
+      });
+    } catch (err) {
+      onError(err instanceof Error ? err.message : String(err));
+    } finally {
+      setUploadingBgm(false);
+    }
+  }
 
   return (
-    <section className="flex h-full flex-col border-l border-[#222836] bg-[#131720]">
-      {/* Context Tab Strip */}
-      <div className="grid grid-cols-4 border-b border-[#222836] bg-[#0F131B]">
+    <section className="flex h-full flex-col border-l border-[#222228] bg-[#111114]">
+      {/* 5-Tab Studio Strip */}
+      <div className="grid grid-cols-5 border-b border-[#222228] bg-[#0C0C0F]">
         {INSPECTOR_TABS.map((tab) => {
           const Icon = tab.icon;
           const active = inspectorContext === tab.id;
@@ -87,206 +149,442 @@ export function ContextInspector({
               key={tab.id}
               type="button"
               onClick={() => setInspectorContext(tab.id)}
-              className={`flex items-center justify-center gap-1 border-b-2 py-2 text-[11px] font-medium transition-colors ${
+              className={`flex flex-col items-center justify-center gap-0.5 border-b-2 py-2 text-[10px] font-medium transition-colors ${
                 active
-                  ? "border-[#6366F1] bg-[#131720] text-white"
-                  : "border-transparent text-[#94A3B8] hover:text-white"
+                  ? "border-[#F59E0B] bg-[#111114] text-[#F4F4F5]"
+                  : "border-transparent text-[#71717A] hover:text-[#D4D4D8]"
               }`}
             >
-              <Icon className="h-3 w-3" />
-              {tab.label}
+              <Icon className="h-3.5 w-3.5" />
+              <span>{tab.label}</span>
             </button>
           );
         })}
       </div>
 
-      {/* Inspector Panel Body */}
+      {/* Inspector Controls Body */}
       <div className="flex-1 space-y-4 overflow-y-auto p-3 text-xs">
+        {/* 1. FRAME TAB */}
         {inspectorContext === "framing" && framing && (
           <>
-            <div>
-              <label className="mb-1.5 block text-[11px] font-medium text-[#94A3B8]">
-                Layout Mode
-              </label>
-              <div className="grid grid-cols-2 gap-1.5">
-                {(["split", "fit", "centre", "crop"] as const).map((m) => (
-                  <button
-                    key={m}
-                    type="button"
-                    onClick={() =>
-                      updateFraming({
-                        mode: m,
-                        camBox:
-                          m === "split" && !framing.camBox
-                            ? { x: 0.02, y: 0.28, w: 0.24, h: 0.26 }
-                            : framing.camBox,
-                      })
-                    }
-                    className={`rounded border px-2 py-1.5 text-xs font-medium capitalize ${
-                      framing.mode === m
-                        ? "border-[#6366F1] bg-[#6366F1]/20 text-white"
-                        : "border-[#222836] bg-[#0B0D12] text-[#94A3B8]"
-                    }`}
-                  >
-                    {m}
-                  </button>
-                ))}
-              </div>
+            <div className="space-y-1.5">
+              <span className="block text-[11px] font-medium text-[#A1A1AA]">
+                Framing Mode
+              </span>
+              <SegmentedControl
+                value={framing.mode === "centre" ? "crop" : framing.mode}
+                onChange={(m) =>
+                  updateFraming({
+                    mode: m,
+                    camBox:
+                      m === "split" && !framing.camBox
+                        ? { x: 0.02, y: 0.28, w: 0.24, h: 0.26 }
+                        : framing.camBox,
+                  })
+                }
+                options={[
+                  { value: "split", label: "Split Cam" },
+                  { value: "fit", label: "Fit Frame" },
+                  { value: "crop", label: "Pan & Zoom" },
+                ]}
+              />
             </div>
 
             {framing.mode === "split" && (
-              <div>
-                <div className="mb-1 flex items-center justify-between text-[11px] text-[#94A3B8]">
-                  <span>Split Seam Ratio</span>
-                  <span className="tabular-tc text-white">
-                    {Math.round(framing.splitRatio * 100)}%
-                  </span>
-                </div>
-                <input
-                  type="range"
-                  min={20}
-                  max={65}
-                  step={1}
-                  value={Math.round(framing.splitRatio * 100)}
-                  onChange={(e) =>
-                    updateFraming({ splitRatio: Number(e.target.value) / 100 })
-                  }
-                  className="w-full accent-[#6366F1]"
+              <ScrubSlider
+                label="Split Seam Ratio"
+                min={20}
+                max={65}
+                step={1}
+                value={Math.round(framing.splitRatio * 100)}
+                displayValue={`${Math.round(framing.splitRatio * 100)}%`}
+                onChange={(v) => updateFraming({ splitRatio: v / 100 })}
+              />
+            )}
+
+            {framing.mode === "fit" && (
+              <div className="space-y-1.5">
+                <span className="block text-[11px] font-medium text-[#A1A1AA]">
+                  Letterbox Backdrop
+                </span>
+                <SegmentedControl
+                  value={framing.fitBackdrop ?? "blur"}
+                  onChange={(fb) => updateFraming({ fitBackdrop: fb })}
+                  options={[
+                    { value: "blur", label: "Soft Blur" },
+                    { value: "black", label: "Cinema Matte Black" },
+                  ]}
                 />
               </div>
             )}
 
-            <div className="flex flex-col gap-1.5 pt-1">
+            {(framing.mode === "crop" || framing.mode === "centre") && (
+              <div className="space-y-3 rounded-md border border-[#222228] bg-[#09090B]/60 p-2.5">
+                <ScrubSlider
+                  label="Optical Zoom"
+                  min={1.0}
+                  max={2.2}
+                  step={0.02}
+                  value={framing.zoom ?? 1.0}
+                  displayValue={`${(framing.zoom ?? 1.0).toFixed(2)}×`}
+                  onChange={(z) => updateFraming({ zoom: z })}
+                />
+                <ScrubSlider
+                  label="Focus Pan X"
+                  min={0}
+                  max={100}
+                  step={1}
+                  value={Math.round((framing.panX ?? 0.5) * 100)}
+                  displayValue={`${Math.round((framing.panX ?? 0.5) * 100)}%`}
+                  onChange={(px) => updateFraming({ panX: px / 100 })}
+                />
+                <ScrubSlider
+                  label="Focus Pan Y"
+                  min={0}
+                  max={100}
+                  step={1}
+                  value={Math.round((framing.panY ?? 0.5) * 100)}
+                  displayValue={`${Math.round((framing.panY ?? 0.5) * 100)}%`}
+                  onChange={(py) => updateFraming({ panY: py / 100 })}
+                />
+              </div>
+            )}
+
+            <div className="flex flex-col gap-1.5">
               <button
                 type="button"
                 onClick={() => {
                   try {
                     splitFramingAtPlayhead();
                   } catch {
-                    // playhead near boundary
+                    onError("Move playhead inside a framing segment to insert a keyframe.");
                   }
                 }}
-                className="flex items-center justify-center gap-1.5 rounded border border-[#222836] bg-[#0B0D12] px-2.5 py-1.5 text-[11px] font-medium text-[#CBD5E1] hover:border-[#6366F1] hover:text-white"
+                className="flex items-center justify-center gap-1.5 rounded-md border border-[#282830] bg-[#18181C] px-2.5 py-1.5 text-[11px] font-medium text-[#D4D4D8] hover:border-[#F59E0B]/60 hover:text-white"
               >
-                <SplitSquareVertical className="h-3.5 w-3.5 text-[#6366F1]" />
-                Split Layout at Playhead ({edl.tracks.video.framing.length} seg)
+                <SplitVertical className="h-3.5 w-3.5 text-[#F59E0B]" />
+                Add Shot Keyframe ({edl.tracks.video.framing.length})
               </button>
 
               {framing.mode === "split" && framing.camBox && onPinWebcam && (
                 <button
                   type="button"
-                  onClick={() =>
-                    void onPinWebcam(framing.camBox!, framing.splitRatio)
-                  }
-                  className="flex items-center justify-center gap-1.5 rounded border border-[#10B981]/40 bg-[#10B981]/10 px-2.5 py-1.5 text-[11px] font-medium text-[#A7F3D0] hover:bg-[#10B981]/20"
+                  onClick={() => void onPinWebcam(framing.camBox!, framing.splitRatio)}
+                  className="flex items-center justify-center gap-1.5 rounded-md border border-[#22C55E]/35 bg-[#22C55E]/10 px-2.5 py-1.5 text-[11px] font-medium text-[#86EFAC] hover:bg-[#22C55E]/18"
                 >
-                  <Pin className="h-3.5 w-3.5" />
-                  Pin Webcam to Creator Profile
+                  <PushPin className="h-3.5 w-3.5" />
+                  Pin Facecam to Profile
                 </button>
               )}
             </div>
 
-            <div className="space-y-2 border-t border-[#222836] pt-3">
-              <div className="flex items-center justify-between">
-                <span className="text-[11px] font-medium text-[#94A3B8]">
-                  Cold-Open Flash-Forward
-                </span>
-                <input
-                  type="checkbox"
-                  checked={Boolean(edl.tracks.video.coldOpen?.enabled)}
-                  onChange={(e) => {
-                    const enabled = e.target.checked;
-                    mutateEdl(enabled ? "Enable cold open" : "Disable cold open", (draft) => {
-                      if (!enabled) {
-                        draft.tracks.video.coldOpen = null;
-                      } else {
-                        const clip = draft.tracks.video.clips[0];
-                        const srcMid = Math.round(
-                          clip.sourceStartMs + (clip.sourceEndMs - clip.sourceStartMs) * 0.6,
-                        );
-                        draft.tracks.video.coldOpen = {
-                          enabled: true,
-                          sourceStartMs: Math.max(0, srcMid),
-                          durationMs: 1500,
-                          fadeOutMs: 120,
-                        };
+            {/* Scene Slice & Cut Transitions */}
+            {edl.tracks.video.clips.length >= 2 && activeClip && (
+              <div className="space-y-2.5 border-t border-[#222228] pt-3">
+                <div className="flex items-center justify-between">
+                  <span className="text-[11px] font-medium text-[#A1A1AA]">
+                    Scene Cut Transitions
+                  </span>
+                  <span className="tabular-tc text-[10px] text-[#71717A]">
+                    {edl.tracks.video.clips.length} scenes
+                  </span>
+                </div>
+
+                <StudioSelect
+                  ariaLabel="Selected Video Scene"
+                  value={activeClip.id}
+                  onChange={(cid) => selectClip(cid)}
+                  options={edl.tracks.video.clips.map((c, idx) => ({
+                    value: c.id,
+                    label: c.label || `Scene ${idx + 1}`,
+                    hint: `${((c.sourceEndMs - c.sourceStartMs) / 1000).toFixed(1)}s`,
+                  }))}
+                />
+
+                {edl.tracks.video.clips[0]?.id !== activeClip.id && (
+                  <div className="space-y-2 rounded-md border border-[#222228] bg-[#09090B]/60 p-2.5">
+                    <div className="space-y-1">
+                      <span className="text-[10px] text-[#A1A1AA]">Incoming Cut Style</span>
+                      <SegmentedControl
+                        size="xs"
+                        value={activeClip.transitionIn ?? "none"}
+                        onChange={(t) =>
+                          updateSliceTransition(activeClip.id, {
+                            transitionIn: t as VideoSlice["transitionIn"],
+                          })
+                        }
+                        options={[
+                          { value: "none", label: "Hard Cut" },
+                          { value: "flash_white", label: "White Flash" },
+                          { value: "dip_black", label: "Dip Black" },
+                        ]}
+                      />
+                    </div>
+
+                    <div className="grid grid-cols-2 gap-2">
+                      <div>
+                        <span className="mb-1 block text-[10px] text-[#A1A1AA]">SFX Hit</span>
+                        <StudioSelect
+                          value={activeClip.transitionSfx ?? "none"}
+                          onChange={(sfx) =>
+                            updateSliceTransition(activeClip.id, {
+                              transitionSfx: sfx as VideoSlice["transitionSfx"],
+                            })
+                          }
+                          options={[
+                            { value: "none", label: "Silent" },
+                            { value: "whoosh_flash", label: "Whoosh" },
+                            { value: "cinema_hit", label: "Sub Hit" },
+                          ]}
+                        />
+                      </div>
+                      <ScrubNumber
+                        label="Duration"
+                        unit="ms"
+                        min={80}
+                        max={800}
+                        step={20}
+                        value={activeClip.transitionDurationMs ?? 240}
+                        onChange={(ms) =>
+                          updateSliceTransition(activeClip.id, {
+                            transitionDurationMs: ms,
+                          })
+                        }
+                      />
+                    </div>
+                  </div>
+                )}
+              </div>
+            )}
+
+            {/* Cold-Open Hook */}
+            <div className="space-y-2.5 border-t border-[#222228] pt-3">
+              <StudioToggle
+                label="Cold-Open Flash-Forward"
+                hint="Tease climax at 0:00 before Scene 1"
+                checked={Boolean(edl.tracks.video.coldOpen?.enabled)}
+                onChange={(enabled) => {
+                  mutateEdl(enabled ? "Enable cold open" : "Disable cold open", (draft) => {
+                    if (!enabled) {
+                      draft.tracks.video.coldOpen = null;
+                    } else {
+                      const clip = draft.tracks.video.clips[0];
+                      const srcMid = Math.round(
+                        clip.sourceStartMs + (clip.sourceEndMs - clip.sourceStartMs) * 0.6,
+                      );
+                      draft.tracks.video.coldOpen = {
+                        enabled: true,
+                        sourceStartMs: Math.max(0, srcMid),
+                        durationMs: 1500,
+                        fadeOutMs: 120,
+                      };
+                    }
+                  });
+                }}
+              />
+
+              {edl.tracks.video.coldOpen?.enabled && (
+                <ScrubSlider
+                  label="Hook Duration"
+                  min={500}
+                  max={3500}
+                  step={100}
+                  value={edl.tracks.video.coldOpen.durationMs}
+                  displayValue={`${(edl.tracks.video.coldOpen.durationMs / 1000).toFixed(2)}s`}
+                  onChange={(ms) => {
+                    mutateEdl("Adjust cold-open duration", (draft) => {
+                      if (draft.tracks.video.coldOpen) {
+                        draft.tracks.video.coldOpen.durationMs = ms;
                       }
                     });
                   }}
-                  className="accent-[#EC4899]"
                 />
-              </div>
-
-              {edl.tracks.video.coldOpen?.enabled && (
-                <div>
-                  <div className="mb-1 flex items-center justify-between text-[11px] text-[#94A3B8]">
-                    <span>Hook Duration</span>
-                    <span className="tabular-tc text-white">
-                      {(edl.tracks.video.coldOpen.durationMs / 1000).toFixed(2)}s
-                    </span>
-                  </div>
-                  <input
-                    type="range"
-                    min={500}
-                    max={3500}
-                    step={100}
-                    value={edl.tracks.video.coldOpen.durationMs}
-                    onChange={(e) => {
-                      const ms = Number(e.target.value);
-                      mutateEdl("Adjust cold-open duration", (draft) => {
-                        if (draft.tracks.video.coldOpen) {
-                          draft.tracks.video.coldOpen.durationMs = ms;
-                        }
-                      });
-                    }}
-                    className="w-full accent-[#EC4899]"
-                  />
-                </div>
               )}
-            </div>
-
-            <div className="space-y-2 border-t border-[#222836] pt-3">
-              <div className="flex items-center justify-between text-[11px] text-[#94A3B8]">
-                <span>Audio Gain</span>
-                <span className="tabular-tc text-white">
-                  {edl.tracks.audio.gainDb >= 0 ? "+" : ""}
-                  {edl.tracks.audio.gainDb.toFixed(1)} dB
-                </span>
-              </div>
-              <input
-                type="range"
-                min={-12}
-                max={12}
-                step={0.5}
-                value={edl.tracks.audio.gainDb}
-                onChange={(e) => {
-                  const val = Number(e.target.value);
-                  mutateEdl("Adjust audio gain", (draft) => {
-                    draft.tracks.audio.gainDb = val;
-                  });
-                }}
-                className="w-full accent-[#10B981]"
-              />
             </div>
           </>
         )}
 
+        {/* 2. AUDIO & BGM TAB */}
+        {inspectorContext === "audio" && (
+          <>
+            <div className="space-y-3">
+              <span className="block text-[11px] font-semibold uppercase tracking-wider text-[#71717A]">
+                Dialogue &amp; Source Stem
+              </span>
+
+              <ScrubSlider
+                label="Dialogue Gain"
+                min={-12}
+                max={12}
+                step={0.5}
+                value={edl.tracks.audio.gainDb}
+                displayValue={`${edl.tracks.audio.gainDb >= 0 ? "+" : ""}${edl.tracks.audio.gainDb.toFixed(1)} dB`}
+                onChange={(v) => updateAudio({ gainDb: v })}
+              />
+
+              <StudioToggle
+                label="Vocal Clarity & 5.1 Isolation"
+                hint="85Hz high-pass + 2.8kHz presence boost"
+                checked={Boolean(edl.tracks.audio.dialogueEnhance)}
+                onChange={(v) => updateAudio({ dialogueEnhance: v })}
+              />
+
+              <StudioToggle
+                label="Mute Original Source Audio"
+                hint="Music-only montage mode"
+                checked={Boolean(edl.tracks.audio.muteOriginal)}
+                onChange={(v) => updateAudio({ muteOriginal: v })}
+              />
+            </div>
+
+            <div className="space-y-3 border-t border-[#222228] pt-3.5">
+              <div className="flex items-center justify-between">
+                <span className="text-[11px] font-semibold uppercase tracking-wider text-[#71717A]">
+                  Background Music (BGM)
+                </span>
+                <input
+                  ref={bgmFileInputRef}
+                  type="file"
+                  accept=".mp3,.wav,.m4a,.aac,.ogg,.flac"
+                  className="hidden"
+                  onChange={(e) => {
+                    const picked = e.target.files?.[0];
+                    if (picked) void handleBgmUpload(picked);
+                    e.target.value = "";
+                  }}
+                />
+                <button
+                  type="button"
+                  disabled={uploadingBgm}
+                  onClick={() => bgmFileInputRef.current?.click()}
+                  className="inline-flex items-center gap-1 rounded border border-[#2C2C35] bg-[#18181C] px-2 py-0.5 text-[10px] font-medium text-[#F4F4F5] hover:border-[#F59E0B]/60 disabled:opacity-45"
+                >
+                  {uploadingBgm ? (
+                    <CircleNotch className="h-3 w-3 animate-spin" />
+                  ) : (
+                    <MusicNotesPlus className="h-3 w-3 text-[#F59E0B]" />
+                  )}
+                  Upload Track
+                </button>
+              </div>
+
+              <StudioToggle
+                label="Enable Background Music"
+                hint="Mixed & EBU R128 loudness-normalized"
+                checked={Boolean(bgm)}
+                onChange={(on) => {
+                  if (!on) {
+                    updateBgm(null);
+                  } else {
+                    const firstId = bgmAssets[0]?.id ?? "dark_cinema_pulse";
+                    updateBgm({
+                      assetId: firstId,
+                      gainDb: -15.5,
+                      duckingEnabled: true,
+                    });
+                  }
+                }}
+              />
+
+              {bgm && (
+                <div className="space-y-3 rounded-md border border-[#222228] bg-[#09090B]/70 p-2.5">
+                  <div>
+                    <span className="mb-1 block text-[10px] text-[#A1A1AA]">Active BGM Track</span>
+                    <StudioSelect
+                      ariaLabel="BGM Asset"
+                      value={bgm.assetId || "dark_cinema_pulse"}
+                      onChange={(aid) => {
+                        const meta = bgmAssets.find((a) => a.id === aid);
+                        updateBgm({
+                          assetId: aid,
+                          startOffsetMs: meta?.dropOffsetMs ?? 0,
+                        });
+                      }}
+                      options={
+                        bgmAssets.length > 0
+                          ? bgmAssets.map((a) => ({
+                              value: a.id,
+                              label: a.name,
+                              hint: `${a.mood} · ${(a.durationMs / 1000).toFixed(0)}s${a.builtin ? " · Built-in" : ""}`,
+                            }))
+                          : [
+                              {
+                                value: bgm.assetId || "dark_cinema_pulse",
+                                label: bgm.assetId || "dark_cinema_pulse",
+                              },
+                            ]
+                      }
+                    />
+                  </div>
+
+                  <ScrubSlider
+                    label="BGM Bed Level"
+                    min={-30}
+                    max={-4}
+                    step={0.5}
+                    value={bgm.gainDb}
+                    displayValue={`${bgm.gainDb.toFixed(1)} dB`}
+                    onChange={(db) => updateBgm({ gainDb: db })}
+                  />
+
+                  <StudioToggle
+                    label="Auto-Duck Under Dialogue"
+                    hint="Sidechain compresses BGM during speech & swells in pauses"
+                    checked={bgm.duckingEnabled}
+                    onChange={(d) => updateBgm({ duckingEnabled: d })}
+                  />
+
+                  <div className="grid grid-cols-3 gap-1.5">
+                    <ScrubNumber
+                      label="Drop Offset"
+                      unit="ms"
+                      min={0}
+                      max={300000}
+                      step={250}
+                      value={bgm.startOffsetMs ?? 0}
+                      onChange={(ms) => updateBgm({ startOffsetMs: ms })}
+                    />
+                    <ScrubNumber
+                      label="Fade In"
+                      unit="ms"
+                      min={0}
+                      max={4000}
+                      step={100}
+                      value={bgm.fadeInMs ?? 500}
+                      onChange={(ms) => updateBgm({ fadeInMs: ms })}
+                    />
+                    <ScrubNumber
+                      label="Fade Out"
+                      unit="ms"
+                      min={0}
+                      max={5000}
+                      step={100}
+                      value={bgm.fadeOutMs ?? 1000}
+                      onChange={(ms) => updateBgm({ fadeOutMs: ms })}
+                    />
+                  </div>
+                </div>
+              )}
+            </div>
+          </>
+        )}
+
+        {/* 3. CAPTIONS TAB */}
         {inspectorContext === "subtitle" && (
           <>
-            {/* Selected Word Time-Stop Card */}
             {selectedWord && (
-              <div className="space-y-2 rounded-lg border border-[#F59E0B]/40 bg-[#F59E0B]/10 p-2.5">
+              <div className="space-y-2.5 rounded-md border border-[#F59E0B]/40 bg-[#16161B] p-2.5">
                 <div className="flex items-center justify-between">
-                  <span className="text-[11px] font-semibold text-[#FDE68A]">
+                  <span className="text-[11px] font-semibold text-[#FBBF24]">
                     Selected Word Time-Stop
                   </span>
                   <button
                     type="button"
                     onClick={() => removeWord(selectedWord.id)}
-                    className="text-[#FDA4AF] hover:text-[#F43F5E]"
+                    className="text-[#A1A1AA] hover:text-[#EF4444]"
                     title="Delete word (Del)"
                   >
-                    <Trash2 className="h-3.5 w-3.5" />
+                    <Trash className="h-3.5 w-3.5" />
                   </button>
                 </div>
 
@@ -294,145 +592,189 @@ export function ContextInspector({
                   type="text"
                   value={selectedWord.text}
                   onChange={(e) => setWordText(selectedWord.id, e.target.value)}
-                  className="w-full rounded border border-[#222836] bg-[#0B0D12] px-2 py-1 text-xs font-semibold text-white"
+                  className="w-full rounded border border-[#2C2C35] bg-[#09090B] px-2 py-1 text-xs font-semibold text-[#F4F4F5] focus:border-[#F59E0B] focus:outline-none"
                 />
 
                 <div className="grid grid-cols-2 gap-2">
-                  <div>
-                    <label className="block text-[10px] text-[#94A3B8]">Start (ms)</label>
-                    <input
-                      type="number"
-                      step={20}
-                      value={selectedWord.startMs}
-                      onChange={(e) =>
-                        setWordTiming(
-                          selectedWord.id,
-                          Number(e.target.value),
-                          selectedWord.endMs,
-                          true,
-                        )
-                      }
-                      className="tabular-tc w-full rounded border border-[#222836] bg-[#0B0D12] px-2 py-1 text-xs text-white"
-                    />
-                  </div>
-                  <div>
-                    <label className="block text-[10px] text-[#94A3B8]">End (ms)</label>
-                    <input
-                      type="number"
-                      step={20}
-                      value={selectedWord.endMs}
-                      onChange={(e) =>
-                        setWordTiming(
-                          selectedWord.id,
-                          selectedWord.startMs,
-                          Number(e.target.value),
-                          true,
-                        )
-                      }
-                      className="tabular-tc w-full rounded border border-[#222836] bg-[#0B0D12] px-2 py-1 text-xs text-white"
-                    />
+                  <ScrubNumber
+                    label="Start"
+                    unit="ms"
+                    min={0}
+                    step={20}
+                    value={selectedWord.startMs}
+                    onChange={(ms) =>
+                      setWordTiming(selectedWord.id, ms, selectedWord.endMs, true)
+                    }
+                  />
+                  <ScrubNumber
+                    label="End"
+                    unit="ms"
+                    min={selectedWord.startMs + 60}
+                    step={20}
+                    value={selectedWord.endMs}
+                    onChange={(ms) =>
+                      setWordTiming(selectedWord.id, selectedWord.startMs, ms, true)
+                    }
+                  />
+                </div>
+
+                <div>
+                  <span className="mb-1 block text-[10px] text-[#A1A1AA]">
+                    Word Neon Glow Override
+                  </span>
+                  <div className="flex items-center gap-1.5">
+                    {PUNCH_GLOW_SWATCHES.map((sw) => {
+                      const active = (selectedWord.glowColor ?? "") === sw.hex;
+                      return (
+                        <button
+                          key={sw.label}
+                          type="button"
+                          title={sw.label}
+                          onClick={() =>
+                            setWordText(
+                              selectedWord.id,
+                              selectedWord.text,
+                              sw.hex ? sw.hex : null,
+                            )
+                          }
+                          className={`h-5 w-5 rounded-full border ${
+                            active
+                              ? "scale-110 border-white ring-1 ring-[#F59E0B]"
+                              : "border-[#32323B]"
+                          }`}
+                          style={{
+                            backgroundColor: sw.hex || "#18181C",
+                          }}
+                        />
+                      );
+                    })}
                   </div>
                 </div>
               </div>
             )}
 
-            <div className="flex items-center justify-between">
-              <span className="text-[11px] text-[#94A3B8]">Burn Subtitles</span>
-              <input
-                type="checkbox"
-                checked={edl.tracks.subtitles.enabled}
-                onChange={(e) =>
-                  mutateEdl("Toggle subtitles", (d) => {
-                    d.tracks.subtitles.enabled = e.target.checked;
-                  })
-                }
-                className="accent-[#F59E0B]"
-              />
-            </div>
+            <StudioToggle
+              label="Burn Subtitles"
+              checked={edl.tracks.subtitles.enabled}
+              onChange={(v) =>
+                mutateEdl("Toggle subtitles", (d) => {
+                  d.tracks.subtitles.enabled = v;
+                })
+              }
+            />
 
-            <div className="flex items-center justify-between">
-              <span className="text-[11px] text-[#94A3B8]">Censor Profanity</span>
-              <input
-                type="checkbox"
-                checked={edl.tracks.subtitles.censorProfanity}
-                onChange={(e) =>
-                  mutateEdl("Toggle profanity filter", (d) => {
-                    d.tracks.subtitles.censorProfanity = e.target.checked;
-                  })
-                }
-                className="accent-[#F59E0B]"
+            <StudioToggle
+              label="Profanity Mask"
+              checked={edl.tracks.subtitles.censorProfanity}
+              onChange={(v) =>
+                mutateEdl("Toggle profanity filter", (d) => {
+                  d.tracks.subtitles.censorProfanity = v;
+                })
+              }
+            />
+
+            <div>
+              <span className="mb-1 block text-[11px] text-[#A1A1AA]">Style Preset</span>
+              <StudioSelect
+                ariaLabel="Caption Style Preset"
+                value={edl.tracks.subtitles.style.preset}
+                onChange={(p) => {
+                  const preset = p as SubtitleStyle["preset"];
+                  mutateEdl(`Preset → ${preset}`, (d) => {
+                    d.tracks.subtitles.style.preset = preset;
+                    if (preset === "cinema_neon_glow" && !d.tracks.subtitles.style.letterSpacing) {
+                      d.tracks.subtitles.style.letterSpacing = 3.5;
+                    }
+                  });
+                }}
+                options={[
+                  {
+                    value: "cinema_neon_glow",
+                    label: "Cinema Neon Glow",
+                    hint: "Dual-layer outer aura · Rotating phrase neon",
+                  },
+                  {
+                    value: "viral_punch_glow",
+                    label: "Viral Punch Glow",
+                    hint: "Clean white + semantic neon bloom",
+                  },
+                  { value: "bold_pop", label: "Bold Pop", hint: "High-impact streamer caps" },
+                  { value: "karaoke_fill", label: "Karaoke Sweep", hint: "Syllable fill sweep" },
+                  { value: "clean_lower", label: "Clean Lower", hint: "Broadcast subtitle" },
+                  { value: "boxed", label: "Dark Boxed", hint: "Translucent backing plate" },
+                ]}
               />
             </div>
 
             <div>
-              <label className="mb-1 block text-[11px] text-[#94A3B8]">Reveal Mode</label>
-              <select
+              <span className="mb-1 block text-[11px] text-[#A1A1AA]">Reveal Cadence</span>
+              <SegmentedControl
+                size="xs"
                 value={edl.tracks.subtitles.style.revealMode}
-                onChange={(e) => {
-                  const mode = e.target.value as SubtitleStyle["revealMode"];
+                onChange={(mode) => {
                   mutateEdl(`Reveal → ${mode}`, (d) => {
                     d.tracks.subtitles.style.revealMode = mode;
                   });
                 }}
-                className="w-full rounded border border-[#222836] bg-[#0B0D12] px-2 py-1.5 text-xs text-white"
-              >
-                <option value="progressive">Progressive (word-by-word)</option>
-                <option value="group">Group (2–3 words)</option>
-                <option value="single_word">Single Word Pop</option>
-              </select>
-            </div>
-
-            <div>
-              <label className="mb-1 block text-[11px] text-[#94A3B8]">Style Preset</label>
-              <select
-                value={edl.tracks.subtitles.style.preset}
-                onChange={(e) => {
-                  const preset = e.target.value as SubtitleStyle["preset"];
-                  mutateEdl(`Preset → ${preset}`, (d) => {
-                    d.tracks.subtitles.style.preset = preset;
-                  });
-                }}
-                className="w-full rounded border border-[#222836] bg-[#0B0D12] px-2 py-1.5 text-xs text-white"
-              >
-                <option value="bold_pop">Bold Pop</option>
-                <option value="karaoke_fill">Karaoke Fill</option>
-                <option value="clean_lower">Clean Lower</option>
-                <option value="boxed">Boxed</option>
-              </select>
-            </div>
-
-            <div>
-              <div className="mb-1 flex items-center justify-between text-[11px] text-[#94A3B8]">
-                <span>Size Scale</span>
-                <span className="tabular-tc text-white">
-                  {edl.tracks.subtitles.style.fontSizeScale.toFixed(2)}×
-                </span>
-              </div>
-              <input
-                type="range"
-                min={60}
-                max={180}
-                step={5}
-                value={Math.round(edl.tracks.subtitles.style.fontSizeScale * 100)}
-                onChange={(e) => {
-                  const scale = Number(e.target.value) / 100;
-                  mutateEdl("Resize captions", (d) => {
-                    d.tracks.subtitles.style.fontSizeScale = scale;
-                  });
-                }}
-                className="w-full accent-[#F59E0B]"
+                options={[
+                  { value: "progressive", label: "Progressive" },
+                  { value: "group", label: "Phrase" },
+                  { value: "single_word", label: "Single" },
+                ]}
               />
             </div>
+
+            <ScrubSlider
+              label="Font Size Scale"
+              min={60}
+              max={180}
+              step={5}
+              value={Math.round(edl.tracks.subtitles.style.fontSizeScale * 100)}
+              displayValue={`${edl.tracks.subtitles.style.fontSizeScale.toFixed(2)}×`}
+              onChange={(v) => {
+                mutateEdl("Resize captions", (d) => {
+                  d.tracks.subtitles.style.fontSizeScale = v / 100;
+                });
+              }}
+            />
+
+            <ScrubSlider
+              label="Vertical Height"
+              min={8}
+              max={78}
+              step={1}
+              value={Math.round(edl.tracks.subtitles.marginVRatio * 100)}
+              displayValue={`${Math.round(edl.tracks.subtitles.marginVRatio * 100)}%`}
+              onChange={(v) => {
+                mutateEdl("Adjust caption height", (d) => {
+                  d.tracks.subtitles.marginVRatio = v / 100;
+                });
+              }}
+            />
+
+            <ScrubSlider
+              label="Letter Tracking"
+              min={0}
+              max={8}
+              step={0.5}
+              value={edl.tracks.subtitles.style.letterSpacing ?? 0.5}
+              displayValue={`${(edl.tracks.subtitles.style.letterSpacing ?? 0.5).toFixed(1)} px`}
+              onChange={(ls) => {
+                mutateEdl("Adjust letter spacing", (d) => {
+                  d.tracks.subtitles.style.letterSpacing = ls;
+                });
+              }}
+            />
 
             <div className="grid grid-cols-3 gap-2">
               {(
                 [
-                  ["primaryColor", "Text"],
-                  ["accentColor", "Accent"],
-                  ["outlineColor", "Stroke"],
+                  ["primaryColor", "Core"],
+                  ["accentColor", "Glow / Active"],
+                  ["outlineColor", "Shadow"],
                 ] as const
               ).map(([field, label]) => (
-                <label key={field} className="block text-[10px] text-[#94A3B8]">
+                <label key={field} className="block text-[10px] text-[#A1A1AA]">
                   {label}
                   <input
                     type="color"
@@ -443,7 +785,7 @@ export function ContextInspector({
                         d.tracks.subtitles.style[field] = hex;
                       });
                     }}
-                    className="mt-1 h-7 w-full cursor-pointer rounded border border-[#222836] bg-[#0B0D12]"
+                    className="mt-1 h-6 w-full cursor-pointer rounded border border-[#222228] bg-[#09090B]"
                   />
                 </label>
               ))}
@@ -451,29 +793,27 @@ export function ContextInspector({
           </>
         )}
 
+        {/* 4. OVERLAYS TAB */}
         {inspectorContext === "overlay" && (
           <>
-            <div className="flex flex-wrap gap-1.5">
+            <div className="grid grid-cols-2 gap-1.5">
               {(
                 [
-                  ["seam_card_white", "+ Seam Card"],
-                  ["hook_banner_dark", "+ Dark Hook"],
-                  ["cta_pill", "+ CTA Pill"],
+                  ["pov_top_bar", "POV Top Bar", "POV: WHEN IT HAPPENS"],
+                  ["watermark_tag", "Watermark", "CUTFLOW"],
+                  ["cinema_credit", "Film Credit", "Cinema Title (2024)"],
+                  ["seam_card_white", "Seam Card", "Headline Hook"],
+                  ["cta_pill", "CTA Pill", "Follow for Part 2"],
                 ] as const
-              ).map(([kind, label]) => (
+              ).map(([kind, label, defaultTxt]) => (
                 <button
                   key={kind}
                   type="button"
-                  onClick={() =>
-                    addOverlay(
-                      kind,
-                      kind === "cta_pill" ? "Follow for Part 2" : "New Title Card",
-                    )
-                  }
-                  className="inline-flex items-center gap-1 rounded border border-[#38BDF8]/40 bg-[#38BDF8]/10 px-2 py-1 text-[11px] font-medium text-[#E0F2FE] hover:bg-[#38BDF8]/20"
+                  onClick={() => addOverlay(kind, defaultTxt)}
+                  className="inline-flex items-center gap-1 rounded border border-[#282830] bg-[#18181C] px-2 py-1 text-[11px] font-medium text-[#D4D4D8] hover:border-[#F59E0B]/50 hover:text-white"
                 >
-                  <Plus className="h-3 w-3" />
-                  {label.replace("+ ", "")}
+                  <Plus className="h-3 w-3 text-[#F59E0B]" />
+                  {label}
                 </button>
               ))}
             </div>
@@ -485,188 +825,244 @@ export function ContextInspector({
                     key={ov.id}
                     type="button"
                     onClick={() => selectOverlay(ov.id)}
-                    className={`rounded border px-2 py-0.5 text-[10px] ${
+                    className={`rounded border px-2 py-0.5 text-[10px] font-medium ${
                       selectedOverlay?.id === ov.id
-                        ? "border-[#38BDF8] bg-[#38BDF8]/20 text-white"
-                        : "border-[#222836] text-[#94A3B8]"
+                        ? "border-[#F59E0B] bg-[#F59E0B]/15 text-[#F4F4F5]"
+                        : "border-[#222228] bg-[#09090B] text-[#A1A1AA]"
                     }`}
                   >
-                    {ov.kind}
+                    {ov.kind.replace(/_/g, " ")}
                   </button>
                 ))}
               </div>
             )}
 
             {selectedOverlay ? (
-              <div className="space-y-3 rounded-lg border border-[#222836] bg-[#0B0D12]/60 p-2.5">
+              <div className="space-y-3 rounded-md border border-[#222228] bg-[#09090B]/70 p-2.5">
                 <div className="flex items-center justify-between">
-                  <span className="text-[11px] font-semibold text-[#38BDF8]">
-                    {selectedOverlay.kind}
+                  <span className="tabular-tc text-[10px] font-semibold uppercase text-[#F59E0B]">
+                    {selectedOverlay.kind.replace(/_/g, " ")}
                   </span>
                   <button
                     type="button"
                     onClick={() => removeOverlay(selectedOverlay.id)}
-                    className="text-[#94A3B8] hover:text-[#F43F5E]"
+                    className="text-[#A1A1AA] hover:text-[#EF4444]"
                     title="Delete overlay"
                   >
-                    <Trash2 className="h-3.5 w-3.5" />
+                    <Trash className="h-3.5 w-3.5" />
                   </button>
                 </div>
 
                 <div>
-                  <label className="mb-1 block text-[10px] text-[#94A3B8]">Card Text</label>
+                  <span className="mb-1 block text-[10px] text-[#A1A1AA]">Text</span>
                   <textarea
                     rows={2}
                     value={selectedOverlay.text}
                     onChange={(e) =>
                       updateOverlay(selectedOverlay.id, { text: e.target.value })
                     }
-                    className="w-full rounded border border-[#222836] bg-[#0B0D12] px-2 py-1 text-xs text-white"
+                    className="w-full rounded border border-[#222228] bg-[#111114] px-2 py-1 text-xs text-[#F4F4F5] focus:border-[#F59E0B] focus:outline-none"
                   />
                 </div>
 
-                <div>
-                  <label className="mb-1 block text-[10px] text-[#94A3B8]">Anchor</label>
-                  <select
-                    value={selectedOverlay.yAnchor}
-                    onChange={(e) =>
-                      updateOverlay(selectedOverlay.id, {
-                        yAnchor: e.target.value as OverlayItem["yAnchor"],
-                      })
-                    }
-                    className="w-full rounded border border-[#222836] bg-[#0B0D12] px-2 py-1 text-xs text-white"
-                  >
-                    <option value="split_seam">Split Seam</option>
-                    <option value="top">Top Safe Area</option>
-                    <option value="bottom">Bottom Safe Area</option>
-                  </select>
-                </div>
+                {selectedOverlay.kind !== "pov_top_bar" && (
+                  <>
+                    <div>
+                      <span className="mb-1 block text-[10px] text-[#A1A1AA]">Anchor Zone</span>
+                      <StudioSelect
+                        value={selectedOverlay.yAnchor}
+                        onChange={(ya) =>
+                          updateOverlay(selectedOverlay.id, {
+                            yAnchor: ya as OverlayItem["yAnchor"],
+                          })
+                        }
+                        options={[
+                          { value: "top", label: "Top Safe Zone" },
+                          { value: "split_seam", label: "Split Seam" },
+                          { value: "bottom", label: "Bottom Safe Zone" },
+                        ]}
+                      />
+                    </div>
 
-                <div>
-                  <div className="mb-1 flex justify-between text-[10px] text-[#94A3B8]">
-                    <span>Vertical Fine Offset</span>
-                    <span className="tabular-tc text-white">
-                      {Math.round(selectedOverlay.yOffsetRatio * 100)}%
-                    </span>
-                  </div>
-                  <input
-                    type="range"
-                    min={-40}
-                    max={40}
-                    step={1}
-                    value={Math.round(selectedOverlay.yOffsetRatio * 100)}
-                    onChange={(e) =>
-                      updateOverlay(selectedOverlay.id, {
-                        yOffsetRatio: Number(e.target.value) / 100,
-                      })
-                    }
-                    className="w-full accent-[#38BDF8]"
+                    <ScrubSlider
+                      label="Horizontal Offset (X)"
+                      min={-45}
+                      max={45}
+                      step={1}
+                      value={Math.round((selectedOverlay.xOffsetRatio ?? 0) * 100)}
+                      displayValue={`${Math.round((selectedOverlay.xOffsetRatio ?? 0) * 100)}%`}
+                      onChange={(x) =>
+                        updateOverlay(selectedOverlay.id, { xOffsetRatio: x / 100 })
+                      }
+                    />
+                  </>
+                )}
+
+                <ScrubSlider
+                  label="Vertical Offset (Y)"
+                  min={-45}
+                  max={45}
+                  step={1}
+                  value={Math.round(selectedOverlay.yOffsetRatio * 100)}
+                  displayValue={`${Math.round(selectedOverlay.yOffsetRatio * 100)}%`}
+                  onChange={(y) =>
+                    updateOverlay(selectedOverlay.id, { yOffsetRatio: y / 100 })
+                  }
+                />
+
+                <ScrubSlider
+                  label="Opacity"
+                  min={15}
+                  max={100}
+                  step={5}
+                  value={Math.round((selectedOverlay.opacity ?? 1) * 100)}
+                  displayValue={`${Math.round((selectedOverlay.opacity ?? 1) * 100)}%`}
+                  onChange={(op) =>
+                    updateOverlay(selectedOverlay.id, { opacity: op / 100 })
+                  }
+                />
+
+                <div className="grid grid-cols-2 gap-2">
+                  <ScrubNumber
+                    label="Start"
+                    unit="ms"
+                    min={0}
+                    step={100}
+                    value={selectedOverlay.startMs}
+                    onChange={(ms) => updateOverlay(selectedOverlay.id, { startMs: ms })}
+                  />
+                  <ScrubNumber
+                    label="End"
+                    unit="ms"
+                    min={selectedOverlay.startMs + 250}
+                    step={100}
+                    value={selectedOverlay.endMs}
+                    onChange={(ms) => updateOverlay(selectedOverlay.id, { endMs: ms })}
                   />
                 </div>
               </div>
             ) : (
-              <p className="text-[11px] text-[#64748B]">
-                No overlays on this clip yet. Add a Seam Card or Hook Banner above.
+              <p className="text-[11px] text-[#71717A]">
+                No graphic overlays on this timeline. Add a POV Bar, Watermark, or Credit above.
               </p>
             )}
           </>
         )}
 
+        {/* 5. RENDER TAB */}
         {inspectorContext === "export" && (
           <>
             <div>
-              <label className="mb-1 block text-[11px] text-[#94A3B8]">Aspect Ratio</label>
-              <div className="grid grid-cols-3 gap-1.5">
-                {(["9:16", "1:1", "16:9"] as const).map((r) => (
-                  <button
-                    key={r}
-                    type="button"
-                    onClick={() =>
-                      mutateEdl(`Ratio → ${r}`, (d) => {
-                        d.output.ratio = r;
-                      })
-                    }
-                    className={`rounded border px-2 py-1.5 text-xs font-medium ${
-                      edl.output.ratio === r
-                        ? "border-[#6366F1] bg-[#6366F1]/20 text-white"
-                        : "border-[#222836] bg-[#0B0D12] text-[#94A3B8]"
-                    }`}
-                  >
-                    {r}
-                  </button>
-                ))}
-              </div>
+              <span className="mb-1.5 block text-[11px] text-[#A1A1AA]">Canvas Aspect Ratio</span>
+              <SegmentedControl
+                value={edl.output.ratio}
+                onChange={(r) =>
+                  mutateEdl(`Ratio → ${r}`, (d) => {
+                    d.output.ratio = r;
+                  })
+                }
+                options={[
+                  { value: "9:16", label: "9:16" },
+                  { value: "4:5", label: "4:5" },
+                  { value: "1:1", label: "1:1" },
+                  { value: "16:9", label: "16:9" },
+                ]}
+              />
             </div>
 
             <div>
-              <label className="mb-1 block text-[11px] text-[#94A3B8]">Resolution</label>
-              <div className="grid grid-cols-4 gap-1">
-                {(["720p", "1080p", "1440p", "4k"] as const).map((q) => (
-                  <button
-                    key={q}
-                    type="button"
-                    onClick={() =>
-                      mutateEdl(`Quality → ${q}`, (d) => {
-                        d.output.quality = q as OutputSettings["quality"];
-                      })
-                    }
-                    className={`rounded border px-1.5 py-1 text-[11px] font-medium ${
-                      edl.output.quality === q
-                        ? "border-[#6366F1] bg-[#6366F1]/20 text-white"
-                        : "border-[#222836] bg-[#0B0D12] text-[#94A3B8]"
-                    }`}
-                  >
-                    {q}
-                  </button>
-                ))}
-              </div>
+              <span className="mb-1.5 block text-[11px] text-[#A1A1AA]">
+                Inner Cinema Border
+              </span>
+              <SegmentedControl
+                size="xs"
+                value={edl.output.borderStyle ?? "none"}
+                onChange={(bs) =>
+                  mutateEdl(`Border → ${bs}`, (d) => {
+                    d.output.borderStyle = bs;
+                  })
+                }
+                options={[
+                  { value: "none", label: "None" },
+                  { value: "thin_rounded", label: "Thin Rounded" },
+                  { value: "double_cinema", label: "Double Frame" },
+                ]}
+              />
             </div>
 
             <div>
-              <label className="mb-1 block text-[11px] text-[#94A3B8]">Encoder Speed Preset</label>
-              <div className="grid grid-cols-2 gap-1.5">
-                {(["draft", "final"] as const).map((preset) => (
-                  <button
-                    key={preset}
-                    type="button"
-                    onClick={() =>
-                      mutateEdl(`Preset → ${preset}`, (d) => {
-                        d.output.speedPreset = preset;
-                      })
-                    }
-                    className={`rounded border px-2 py-1.5 text-xs font-medium capitalize ${
-                      edl.output.speedPreset === preset
-                        ? "border-[#6366F1] bg-[#6366F1]/20 text-white"
-                        : "border-[#222836] bg-[#0B0D12] text-[#94A3B8]"
-                    }`}
-                  >
-                    {preset}
-                  </button>
-                ))}
-              </div>
+              <span className="mb-1.5 block text-[11px] text-[#A1A1AA]">Color &amp; Detail Grade</span>
+              <SegmentedControl
+                size="xs"
+                value={edl.output.cinemaGrade ?? "off"}
+                onChange={(cg) =>
+                  mutateEdl(`Grade → ${cg}`, (d) => {
+                    d.output.cinemaGrade = cg;
+                  })
+                }
+                options={[
+                  { value: "off", label: "Source Natural" },
+                  { value: "crisp_hd", label: "Crisp HD + Contrast" },
+                ]}
+              />
+            </div>
+
+            <div>
+              <span className="mb-1.5 block text-[11px] text-[#A1A1AA]">Resolution</span>
+              <SegmentedControl
+                size="xs"
+                value={edl.output.quality}
+                onChange={(q) =>
+                  mutateEdl(`Quality → ${q}`, (d) => {
+                    d.output.quality = q as OutputSettings["quality"];
+                  })
+                }
+                options={[
+                  { value: "720p", label: "720p" },
+                  { value: "1080p", label: "1080p" },
+                  { value: "1440p", label: "1440p" },
+                  { value: "4k", label: "4K" },
+                ]}
+              />
+            </div>
+
+            <div>
+              <span className="mb-1.5 block text-[11px] text-[#A1A1AA]">Encoder Pass</span>
+              <SegmentedControl
+                value={edl.output.speedPreset}
+                onChange={(preset) =>
+                  mutateEdl(`Preset → ${preset}`, (d) => {
+                    d.output.speedPreset = preset;
+                  })
+                }
+                options={[
+                  { value: "draft", label: "Draft Fast" },
+                  { value: "final", label: "Final Master" },
+                ]}
+              />
             </div>
 
             <button
               type="button"
               disabled={exportingNow || !canExport}
               onClick={() => void onExportNow()}
-              className="flex w-full items-center justify-center gap-1.5 rounded-md bg-[#6366F1] px-3 py-2 text-xs font-semibold text-white hover:bg-[#5558E6] disabled:opacity-45"
+              className="flex w-full items-center justify-center gap-1.5 rounded-md bg-[#F59E0B] px-3 py-2 text-xs font-semibold text-[#09090B] transition-colors hover:bg-[#FBBF24] disabled:opacity-40"
             >
               {exportingNow ? (
-                <Loader2 className="h-3.5 w-3.5 animate-spin" />
+                <CircleNotch className="h-3.5 w-3.5 animate-spin" />
               ) : (
-                <Rocket className="h-3.5 w-3.5" />
+                <Export weight="bold" className="h-3.5 w-3.5" />
               )}
               {exportingNow
-                ? "Rendering MP4..."
-                : `Render ${edl.output.quality} (${edl.output.speedPreset})`}
+                ? "Encoding Master MP4..."
+                : `Render ${edl.output.ratio} · ${edl.output.quality}`}
             </button>
           </>
         )}
 
         {lastActionLabel && (
-          <div className="border-t border-[#222836] pt-2 text-[10px] text-[#64748B]">
-            Last command: {lastActionLabel}
+          <div className="tabular-tc border-t border-[#1E1E24] pt-2 text-[10px] text-[#71717A]">
+            LAST: {lastActionLabel}
           </div>
         )}
       </div>

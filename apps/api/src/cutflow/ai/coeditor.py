@@ -100,9 +100,18 @@ def _deterministic_ops_from_instruction(
     elif "group" in lower and ("caption" in lower or "subtitle" in lower or "reveal" in lower):
         sub_op["revealMode"] = "group"
 
-    for preset in ("bold_pop", "karaoke_fill", "clean_lower", "boxed"):
+    for preset in (
+        "bold_pop",
+        "karaoke_fill",
+        "clean_lower",
+        "boxed",
+        "cinema_neon_glow",
+        "viral_punch_glow",
+    ):
         if preset in lower or preset.replace("_", " ") in lower:
             sub_op["preset"] = preset
+    if "neon glow" in lower:
+        sub_op.setdefault("preset", "cinema_neon_glow")
 
     if "uncensor" in lower or "profanity off" in lower or "allow profanity" in lower:
         sub_op["censorProfanity"] = False
@@ -176,6 +185,31 @@ def _deterministic_ops_from_instruction(
     if len(frame_op) > 1:
         ops.append(frame_op)
 
+    # 7. BGM, Aspect Ratio, Cinema Border & Grade
+    if any(k in lower for k in ("remove bgm", "bgm off", "no music", "mute bgm")):
+        ops.append({"op": "set_bgm", "enabled": False})
+    elif any(k in lower for k in ("dark cinema bgm", "synthwave", "cinema music", "add bgm")):
+        asset = "upbeat_challenge_drive" if "upbeat" in lower else "dark_cinema_pulse"
+        ops.append({"op": "set_bgm", "assetId": asset, "duckingEnabled": True})
+
+    out_op: dict[str, Any] = {"op": "set_output"}
+    if "1:1" in lower or "square" in lower:
+        out_op["ratio"] = "1:1"
+    elif "4:5" in lower:
+        out_op["ratio"] = "4:5"
+    elif "9:16" in lower:
+        out_op["ratio"] = "9:16"
+    if "rounded border" in lower or "thin border" in lower:
+        out_op["borderStyle"] = "thin_rounded"
+    elif "double border" in lower:
+        out_op["borderStyle"] = "double_cinema"
+    elif "no border" in lower:
+        out_op["borderStyle"] = "none"
+    if "crisp hd" in lower or "cinema grade" in lower:
+        out_op["cinemaGrade"] = "crisp_hd"
+    if len(out_op) > 1:
+        ops.append(out_op)
+
     if ops:
         return ops, "Applied your requested timeline edit optimistically."
     return [], (
@@ -219,7 +253,8 @@ def run_coeditor(
             "- {\"op\": \"blade_cut\", \"cutStartMs\": int, \"cutEndMs\": int}\n"
             "- {\"op\": \"set_subtitles\", \"enabled\"?: bool, \"censorProfanity\"?: bool, "
             "\"revealMode\"?: \"group\"|\"progressive\"|\"single_word\", "
-            "\"preset\"?: \"bold_pop\"|\"karaoke_fill\"|\"clean_lower\"|\"boxed\", "
+            "\"preset\"?: \"bold_pop\"|\"karaoke_fill\"|\"clean_lower\"|\"boxed\""
+            "|\"cinema_neon_glow\"|\"viral_punch_glow\", "
             "\"marginVRatio\"?: float}\n"
             "- {\"op\": \"insert_word\", \"text\": string, \"startMs\": int, "
             "\"durationMs\"?: int}\n"
@@ -230,7 +265,12 @@ def run_coeditor(
             "- {\"op\": \"set_cold_open\", \"enabled\": bool, "
             "\"sourceStartMs\"?: int, \"durationMs\"?: int}\n"
             "- {\"op\": \"set_framing\", \"mode\"?: \"split\"|\"fit\"|\"centre\"|\"crop\", "
-            "\"splitRatio\"?: float}"
+            "\"splitRatio\"?: float, \"panX\"?: float, \"panY\"?: float, \"zoom\"?: float}\n"
+            "- {\"op\": \"set_bgm\", \"enabled\"?: bool, \"assetId\"?: string, "
+            "\"gainDb\"?: float, \"duckingEnabled\"?: bool}\n"
+            "- {\"op\": \"set_output\", \"ratio\"?: \"9:16\"|\"4:5\"|\"1:1\"|\"16:9\", "
+            "\"borderStyle\"?: \"none\"|\"thin_rounded\"|\"double_cinema\", "
+            "\"cinemaGrade\"?: \"off\"|\"crisp_hd\"}"
         )
         user_prompt = (
             f"Clip title: {edl.title}\n"

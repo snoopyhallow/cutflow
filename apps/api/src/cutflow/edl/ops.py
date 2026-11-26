@@ -6,6 +6,7 @@ import uuid
 from typing import Any
 
 from .schema import (
+    BgmTrack,
     ColdOpenBlock,
     FramingSegment,
     NormalizedBox,
@@ -99,27 +100,30 @@ def apply_blade_cut(
             new_clips.append(clip)
             continue
 
-        # Left surviving portion before cut
+        # Left surviving portion before cut (preserves source_id, label, and incoming transition)
         if s_t0 < c_start:
             left_dur = c_start - s_t0
             if left_dur >= MIN_SLICE_MS:
                 new_clips.append(
-                    VideoSlice(
-                        id=clip.id,
-                        source_start_ms=clip.source_start_ms,
-                        source_end_ms=clip.source_start_ms + left_dur,
+                    clip.model_copy(
+                        update={
+                            "source_end_ms": clip.source_start_ms + left_dur,
+                        }
                     )
                 )
-        # Right surviving portion after cut
+        # Right surviving portion after cut (preserves source_id, clean hard cut across deleted gap)
         if s_t1 > c_end:
             right_offset = c_end - s_t0
             right_dur = s_t1 - c_end
             if right_dur >= MIN_SLICE_MS:
                 new_clips.append(
-                    VideoSlice(
-                        id=f"{clip.id}_{uuid.uuid4().hex[:4]}",
-                        source_start_ms=clip.source_start_ms + right_offset,
-                        source_end_ms=clip.source_end_ms,
+                    clip.model_copy(
+                        update={
+                            "id": f"{clip.id}_{uuid.uuid4().hex[:4]}",
+                            "source_start_ms": clip.source_start_ms + right_offset,
+                            "transition_in": "none",
+                            "transition_sfx": "none",
+                        }
                     )
                 )
 
@@ -439,7 +443,14 @@ def apply_edl_patch(
             if op.get("revealMode") in ("group", "progressive", "single_word"):
                 subs.style.reveal_mode = op["revealMode"]
                 summaries.append(f"Reveal mode → {subs.style.reveal_mode}")
-            if op.get("preset") in ("bold_pop", "karaoke_fill", "clean_lower", "boxed"):
+            if op.get("preset") in (
+                "bold_pop",
+                "karaoke_fill",
+                "clean_lower",
+                "boxed",
+                "cinema_neon_glow",
+                "viral_punch_glow",
+            ):
                 subs.style.preset = op["preset"]
                 summaries.append(f"Caption preset → {subs.style.preset}")
             if op.get("marginVRatio") is not None:
@@ -515,6 +526,14 @@ def apply_edl_patch(
                 seg.mode = op["mode"]
             if op.get("splitRatio") is not None:
                 seg.split_ratio = max(0.20, min(0.65, float(op["splitRatio"])))
+            if op.get("panX") is not None:
+                seg.pan_x = max(0.0, min(1.0, float(op["panX"])))
+            if op.get("panY") is not None:
+                seg.pan_y = max(0.0, min(1.0, float(op["panY"])))
+            if op.get("zoom") is not None:
+                seg.zoom = max(1.0, min(2.5, float(op["zoom"])))
+            if op.get("fitBackdrop") in ("blur", "black"):
+                seg.fit_backdrop = op["fitBackdrop"]
             if isinstance(op.get("camBox"), dict):
                 seg.cam_box = NormalizedBox.model_validate(op["camBox"]).clamped()
             summaries.append(f"Framing → {seg.mode}")
@@ -532,5 +551,99 @@ def apply_edl_patch(
             current, cuts, saved = auto_tighten_silence(current, min_gap_ms=min_gap)
             if cuts > 0:
                 summaries.append(f"Tightened {cuts} silent gap(s) (-{saved / 1000:.1f}s)")
+
+        elif kind == "set_audio":
+            aud = current.tracks.audio
+            if op.get("gainDb") is not None:
+                aud.gain_db = max(-24.0, min(24.0, float(op["gainDb"])))
+            if isinstance(op.get("dialogueEnhance"), bool):
+                aud.dialogue_enhance = op["dialogueEnhance"]
+            if isinstance(op.get("muteOriginal"), bool):
+                aud.mute_original = op["muteOriginal"]
+            if op.get("normalizeLufs") is not None:
+                aud.normalize_lufs = max(-24.0, min(-8.0, float(op["normalizeLufs"])))
+            summaries.append("Updated dialogue audio settings")
+
+        elif kind == "set_bgm":
+            asset_id = str(op.get("assetId") or "").strip()
+            if op.get("enabled") is False or (
+                "assetId" in op and not asset_id
+            ):
+                current.tracks.audio.bgm = None
+                summaries.append("BGM → off")
+            else:
+                prev_bgm = current.tracks.audio.bgm
+                eff_id = asset_id or (prev_bgm.asset_id if prev_bgm else "dark_cinema_pulse")
+                current.tracks.audio.bgm = BgmTrack(
+                    asset_id=eff_id,
+                    gain_db=max(
+                        -36.0,
+                        min(0.0, float(op.get("gainDb", prev_bgm.gain_db if prev_bgm else -16.0))),
+                    ),
+                    ducking_enabled=bool(
+                        op.get(
+                            "duckingEnabled",
+                            prev_bgm.ducking_enabled if prev_bgm else True,
+                        )
+                    ),
+                    start_offset_ms=max(
+                        0,
+                        int(
+                            op.get(
+                                "startOffsetMs",
+                                prev_bgm.start_offset_ms if prev_bgm else 0,
+                            )
+                        ),
+                    ),
+                    fade_in_ms=max(
+                        0,
+                        min(
+                            5000,
+                            int(op.get("fadeInMs", prev_bgm.fade_in_ms if prev_bgm else 500)),
+                        ),
+                    ),
+                    fade_out_ms=max(
+                        0,
+                        min(
+                            5000,
+                            int(op.get("fadeOutMs", prev_bgm.fade_out_ms if prev_bgm else 1000)),
+                        ),
+                    ),
+                )
+                summaries.append(f"BGM → {eff_id}")
+
+        elif kind == "set_output":
+            out_spec = current.output
+            if op.get("ratio") in ("9:16", "4:5", "1:1", "16:9"):
+                out_spec.ratio = op["ratio"]
+            if op.get("quality") in ("720p", "1080p", "1440p", "4k"):
+                out_spec.quality = op["quality"]
+            if op.get("speedPreset") in ("draft", "final"):
+                out_spec.speed_preset = op["speedPreset"]
+            if op.get("borderStyle") in ("none", "thin_rounded", "double_cinema"):
+                out_spec.border_style = op["borderStyle"]
+            if op.get("cinemaGrade") in ("off", "crisp_hd"):
+                out_spec.cinema_grade = op["cinemaGrade"]
+            summaries.append(f"Output → {out_spec.ratio} ({out_spec.border_style})")
+
+        elif kind == "set_slice_transition":
+            clips = current.tracks.video.clips
+            clip_id = str(op.get("clipId") or "")
+            target_clip = next((c for c in clips if c.id == clip_id), None)
+            if target_clip is None and op.get("clipIndex") is not None:
+                c_idx = max(0, min(len(clips) - 1, int(op["clipIndex"])))
+                target_clip = clips[c_idx]
+            if target_clip is not None:
+                if op.get("transitionIn") in ("none", "flash_white", "dip_black", "dissolve"):
+                    target_clip.transition_in = op["transitionIn"]
+                if op.get("transitionDurationMs") is not None:
+                    target_clip.transition_duration_ms = max(
+                        80, min(1000, int(op["transitionDurationMs"]))
+                    )
+                if op.get("transitionSfx") in ("none", "whoosh_flash", "cinema_hit"):
+                    target_clip.transition_sfx = op["transitionSfx"]
+                summaries.append(
+                    f"Slice {target_clip.id} transition → {target_clip.transition_in}"
+                )
 
     return current, before, summaries

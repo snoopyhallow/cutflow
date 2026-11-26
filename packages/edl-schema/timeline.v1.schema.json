@@ -25,11 +25,21 @@
       "required": ["ratio", "quality", "speedPreset", "fps", "loudnessLufs"],
       "additionalProperties": false,
       "properties": {
-        "ratio": { "type": "string", "enum": ["9:16", "1:1", "16:9"] },
+        "ratio": { "type": "string", "enum": ["9:16", "4:5", "1:1", "16:9"] },
         "quality": { "type": "string", "enum": ["720p", "1080p", "1440p", "4k"] },
         "speedPreset": { "type": "string", "enum": ["draft", "final"] },
         "fps": { "type": "integer", "minimum": 15, "maximum": 120 },
-        "loudnessLufs": { "type": "number", "minimum": -36, "maximum": -5 }
+        "loudnessLufs": { "type": "number", "minimum": -36, "maximum": -5 },
+        "borderStyle": {
+          "type": "string",
+          "enum": ["none", "thin_rounded", "double_cinema"],
+          "default": "none"
+        },
+        "cinemaGrade": {
+          "type": "string",
+          "enum": ["off", "crisp_hd"],
+          "default": "off"
+        }
       }
     },
     "tracks": {
@@ -64,7 +74,25 @@
                 "properties": {
                   "id": { "type": "string", "minLength": 1 },
                   "sourceStartMs": { "type": "integer", "minimum": 0 },
-                  "sourceEndMs": { "type": "integer", "minimum": 1 }
+                  "sourceEndMs": { "type": "integer", "minimum": 1 },
+                  "sourceId": { "type": ["string", "null"], "default": null },
+                  "label": { "type": "string", "default": "" },
+                  "transitionIn": {
+                    "type": "string",
+                    "enum": ["none", "flash_white", "dip_black", "dissolve"],
+                    "default": "none"
+                  },
+                  "transitionDurationMs": {
+                    "type": "integer",
+                    "minimum": 80,
+                    "maximum": 800,
+                    "default": 220
+                  },
+                  "transitionSfx": {
+                    "type": "string",
+                    "enum": ["none", "whoosh_flash", "cinema_hit"],
+                    "default": "none"
+                  }
                 }
               }
             },
@@ -82,7 +110,16 @@
                   "mode": { "type": "string", "enum": ["split", "fit", "centre", "crop"] },
                   "splitRatio": { "type": "number", "minimum": 0.2, "maximum": 0.65, "default": 0.35 },
                   "camBox": { "$ref": "#/$defs/normalizedBox" },
-                  "gameBox": { "$ref": "#/$defs/normalizedBox" }
+                  "gameBox": { "$ref": "#/$defs/normalizedBox" },
+                  "fitBackdrop": {
+                    "type": "string",
+                    "enum": ["blur", "black"],
+                    "default": "blur"
+                  },
+                  "panX": { "type": "number", "minimum": 0, "maximum": 1, "default": 0.5 },
+                  "panY": { "type": "number", "minimum": 0, "maximum": 1, "default": 0.5 },
+                  "zoom": { "type": "number", "minimum": 1.0, "maximum": 2.5, "default": 1.0 },
+                  "sourceCropBox": { "$ref": "#/$defs/normalizedBox" }
                 }
               }
             }
@@ -95,14 +132,19 @@
           "properties": {
             "gainDb": { "type": "number", "minimum": -24, "maximum": 24, "default": 0 },
             "normalizeLufs": { "type": "number", "minimum": -36, "maximum": -5, "default": -14 },
+            "dialogueEnhance": { "type": "boolean", "default": false },
+            "muteOriginal": { "type": "boolean", "default": false },
             "bgm": {
               "type": ["object", "null"],
               "default": null,
               "additionalProperties": false,
               "properties": {
                 "assetId": { "type": "string" },
-                "gainDb": { "type": "number", "default": -18 },
-                "duckingEnabled": { "type": "boolean", "default": true }
+                "gainDb": { "type": "number", "minimum": -48, "maximum": 12, "default": -16 },
+                "duckingEnabled": { "type": "boolean", "default": true },
+                "startOffsetMs": { "type": "integer", "minimum": 0, "default": 0 },
+                "fadeInMs": { "type": "integer", "minimum": 0, "maximum": 5000, "default": 500 },
+                "fadeOutMs": { "type": "integer", "minimum": 0, "maximum": 5000, "default": 1000 }
               }
             }
           }
@@ -118,13 +160,29 @@
               "required": ["preset", "revealMode", "font", "fontSizeScale", "primaryColor", "accentColor", "outlineColor"],
               "additionalProperties": false,
               "properties": {
-                "preset": { "type": "string", "enum": ["bold_pop", "karaoke_fill", "clean_lower", "boxed"] },
+                "preset": {
+                  "type": "string",
+                  "enum": [
+                    "bold_pop",
+                    "karaoke_fill",
+                    "clean_lower",
+                    "boxed",
+                    "cinema_neon_glow",
+                    "viral_punch_glow"
+                  ]
+                },
                 "revealMode": { "type": "string", "enum": ["group", "progressive", "single_word"] },
                 "font": { "type": "string", "minLength": 1 },
                 "fontSizeScale": { "type": "number", "minimum": 0.5, "maximum": 2.0 },
                 "primaryColor": { "type": "string", "pattern": "^#[0-9A-Fa-f]{6}$" },
                 "accentColor": { "type": "string", "pattern": "^#[0-9A-Fa-f]{6}$" },
-                "outlineColor": { "type": "string", "pattern": "^#[0-9A-Fa-f]{6}$" }
+                "outlineColor": { "type": "string", "pattern": "^#[0-9A-Fa-f]{6}$" },
+                "letterSpacing": { "type": "number", "minimum": 0, "maximum": 12, "default": 0 },
+                "colorPalette": {
+                  "type": "array",
+                  "items": { "type": "string", "pattern": "^#[0-9A-Fa-f]{6}$" },
+                  "default": []
+                }
               }
             },
             "censorProfanity": { "type": "boolean" },
@@ -152,7 +210,12 @@
                   "text": { "type": "string", "minLength": 1 },
                   "startMs": { "type": "integer", "minimum": 0 },
                   "endMs": { "type": "integer", "minimum": 1 },
-                  "speaker": { "type": ["string", "null"], "default": null }
+                  "speaker": { "type": ["string", "null"], "default": null },
+                  "glowColor": {
+                    "type": ["string", "null"],
+                    "pattern": "^#[0-9A-Fa-f]{6}$",
+                    "default": null
+                  }
                 }
               }
             }
@@ -166,12 +229,24 @@
             "additionalProperties": false,
             "properties": {
               "id": { "type": "string", "minLength": 1 },
-              "kind": { "type": "string", "enum": ["seam_card_white", "hook_banner_dark", "cta_pill"] },
+              "kind": {
+                "type": "string",
+                "enum": [
+                  "seam_card_white",
+                  "hook_banner_dark",
+                  "cta_pill",
+                  "pov_top_bar",
+                  "watermark_tag",
+                  "cinema_credit"
+                ]
+              },
               "text": { "type": "string" },
               "startMs": { "type": "integer", "minimum": 0 },
               "endMs": { "type": "integer", "minimum": 1 },
               "yAnchor": { "type": "string", "enum": ["split_seam", "top", "bottom"], "default": "split_seam" },
               "yOffsetRatio": { "type": "number", "minimum": -0.5, "maximum": 0.5, "default": 0.0 },
+              "xOffsetRatio": { "type": "number", "minimum": -0.5, "maximum": 0.5, "default": 0.0 },
+              "opacity": { "type": "number", "minimum": 0.1, "maximum": 1.0, "default": 1.0 },
               "maxLines": { "type": "integer", "minimum": 1, "maximum": 4, "default": 2 }
             }
           }

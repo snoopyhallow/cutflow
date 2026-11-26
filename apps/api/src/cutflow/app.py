@@ -15,6 +15,7 @@ from fastapi.staticfiles import StaticFiles
 
 from . import __version__, db, paths
 from .api.v1 import router as v1_router
+from .audio import ensure_starter_audio_assets
 from .ingest import InboxWatcher
 from .security import LocalSecurityMiddleware
 from .workspace.jobs import job_manager
@@ -44,6 +45,7 @@ async def _inbox_watcher_loop() -> None:
 @contextlib.asynccontextmanager
 async def lifespan(_app: FastAPI) -> AsyncIterator[None]:
     paths.ensure_layout()
+    ensure_starter_audio_assets()
     db.init_db()
     if os.environ.get(ENV_SKIP_LEGACY_IMPORT) == "1":
         seed_and_import_profiles(autoclip_profiles_file=Path("/__nonexistent__"))

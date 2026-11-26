@@ -36,6 +36,135 @@ describe("Canonical EDL v1 Zod contract", () => {
     badWord.tracks.subtitles.words[0].startMs = 2000;
     expect(() => TimelineProjectSchema.parse(badWord)).toThrow();
   });
+
+  it("validates Phase 2 Cinema, 4:5, Neon Glow, Transition, Mashup, and BGM fields", () => {
+    const cinemaEdl = {
+      ...structuredClone(sampleEdlFixture),
+      output: {
+        ratio: "4:5",
+        quality: "1080p",
+        speedPreset: "final",
+        fps: 60,
+        loudnessLufs: -14,
+        borderStyle: "thin_rounded",
+        cinemaGrade: "crisp_hd",
+      },
+      tracks: {
+        ...structuredClone(sampleEdlFixture.tracks),
+        video: {
+          coldOpen: null,
+          clips: [
+            {
+              id: "m1",
+              sourceStartMs: 0,
+              sourceEndMs: 10000,
+              sourceId: "src_movie_1",
+              label: "Scene 1",
+              transitionIn: "none",
+              transitionDurationMs: 220,
+              transitionSfx: "none",
+            },
+            {
+              id: "m2",
+              sourceStartMs: 5000,
+              sourceEndMs: 15000,
+              sourceId: "src_movie_2",
+              label: "Scene 2",
+              transitionIn: "flash_white",
+              transitionDurationMs: 220,
+              transitionSfx: "whoosh_flash",
+            },
+          ],
+          framing: [
+            {
+              id: "f1",
+              timelineStartMs: 0,
+              timelineEndMs: 20000,
+              mode: "crop",
+              splitRatio: 0.35,
+              camBox: null,
+              gameBox: null,
+              fitBackdrop: "black",
+              panX: 0.42,
+              panY: 0.38,
+              zoom: 1.18,
+              sourceCropBox: { x: 0, y: 0.12, w: 1, h: 0.76 },
+            },
+          ],
+        },
+        audio: {
+          gainDb: 1.5,
+          normalizeLufs: -14,
+          dialogueEnhance: true,
+          muteOriginal: false,
+          bgm: {
+            assetId: "dark_cinema_pulse",
+            gainDb: -16,
+            duckingEnabled: true,
+            startOffsetMs: 4200,
+            fadeInMs: 500,
+            fadeOutMs: 1200,
+          },
+        },
+        subtitles: {
+          ...structuredClone(sampleEdlFixture.tracks.subtitles),
+          style: {
+            preset: "cinema_neon_glow",
+            revealMode: "progressive",
+            font: "Montserrat-ExtraBold",
+            fontSizeScale: 1.0,
+            primaryColor: "#FFFFFF",
+            accentColor: "#4F7CFF",
+            outlineColor: "#000000",
+            letterSpacing: 3.5,
+            colorPalette: ["#4F7CFF", "#4ADE80", "#FBBF24"],
+          },
+          words: [
+            {
+              id: "w1",
+              text: "DIED.",
+              startMs: 400,
+              endMs: 1100,
+              speaker: "S1",
+              glowColor: "#F87171",
+            },
+          ],
+        },
+        overlays: [
+          {
+            id: "ov_pov",
+            kind: "pov_top_bar",
+            text: "POV: HE ALMOST DIED.",
+            startMs: 0,
+            endMs: 3500,
+            yAnchor: "top",
+            yOffsetRatio: 0,
+            xOffsetRatio: 0,
+            opacity: 1.0,
+            maxLines: 1,
+          },
+          {
+            id: "ov_wm",
+            kind: "watermark_tag",
+            text: "JJ_EDIT",
+            startMs: 0,
+            endMs: 20000,
+            yAnchor: "bottom",
+            yOffsetRatio: 0.06,
+            xOffsetRatio: 0.12,
+            opacity: 0.75,
+            maxLines: 1,
+          },
+        ],
+      },
+    };
+    const parsed = TimelineProjectSchema.parse(cinemaEdl);
+    expect(parsed.output.ratio).toBe("4:5");
+    expect(parsed.output.borderStyle).toBe("thin_rounded");
+    expect(parsed.tracks.video.clips[1]?.transitionIn).toBe("flash_white");
+    expect(parsed.tracks.subtitles.style.preset).toBe("cinema_neon_glow");
+    expect(parsed.tracks.overlays[0]?.kind).toBe("pov_top_bar");
+  });
 });
 
 describe("TimelineMapper & non-destructive EDL operations", () => {
@@ -195,6 +324,27 @@ describe("Zustand Command-Pattern Timeline Store & DemoTransport", () => {
     const postCopy = await demo.generatePostCopy("clip_demo_001", "tiktok");
     expect(postCopy.hashtags.length).toBeGreaterThanOrEqual(4);
     expect(postCopy.fullCopy).toContain(postCopy.title);
+
+    // Phase 4: Twitch VOD probe, unlicensed site rejection, BGM library, and Theme Mashup
+    const twitchProbe = await demo.probeUrl("https://www.twitch.tv/videos/2939401420");
+    expect(twitchProbe.platform).toBe("twitch");
+    expect(twitchProbe.chapters.length).toBeGreaterThanOrEqual(2);
+
+    await expect(
+      demo.probeUrl("https://kisskh.co/Drama/Spider-Man/Episode-0"),
+    ).rejects.toThrow(/anti-bot\/DRM/i);
+
+    const bgmList = await demo.listBgm();
+    expect(bgmList.some((b) => b.id === "dark_cinema_pulse")).toBe(true);
+
+    const mashup = await demo.createMashup({
+      projectIds: ["clip_demo_cinema", "clip_demo_001"],
+      title: "Dark Cinema Compilation",
+      povHook: "POV: REALITY HITS",
+      transitionStyle: "flash_white",
+    });
+    expect(mashup.sliceCount).toBe(2);
+    expect(mashup.edl.output.ratio).toBe("1:1");
   });
 
   it("magnetically snaps word handles to waveform onsets and supports NLE store commands", () => {

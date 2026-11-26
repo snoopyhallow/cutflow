@@ -24,23 +24,49 @@ class CreatorProfile(BaseModel):
     name: str = Field(min_length=1, max_length=120)
     creator_name: str = ""
     brief: str = ""
+    content_mode: Literal["stream", "cinema"] = "stream"
+    preferred_lang: str = "en"
     min_duration_s: float = Field(default=15.0, gt=0)
-    max_duration_s: float = Field(default=50.0, gt=0)
+    max_duration_s: float = Field(default=50.0, gt=0, le=300.0)
     max_clips: int = Field(default=8, ge=1, le=50)
+    default_ratio: Literal["9:16", "4:5", "1:1", "16:9"] = "9:16"
     layout_mode: Literal[
         "auto_split", "split", "fit", "centre", "crop", "auto_reframe"
     ] = "auto_split"
+    fit_backdrop: Literal["blur", "black"] = "blur"
     split_ratio: float = Field(default=0.35, ge=0.20, le=0.65)
     cam_box: NormalizedBox | None = None
-    title_card_style: Literal["seam_card_white", "hook_banner_dark", "off"] = "seam_card_white"
+    border_style: Literal["none", "thin_rounded", "double_cinema"] = "none"
+    cinema_grade: Literal["off", "crisp_hd"] = "off"
+    title_card_style: Literal[
+        "seam_card_white", "hook_banner_dark", "pov_top_bar", "off"
+    ] = "seam_card_white"
     cold_open_enabled: bool = True
     cold_open_duration_ms: int = Field(default=1500, ge=500, le=4000)
     cta_mode: Literal["off", "end_banner", "persistent"] = "off"
     cta_text: str = ""
+    watermark_text: str = ""
+    watermark_opacity: float = Field(default=0.78, ge=0.10, le=1.0)
+    show_cinema_credit: bool = False
+    transition_style: Literal["none", "flash_white", "dip_black", "dissolve"] = "none"
+    transition_sfx: Literal["none", "whoosh_flash", "cinema_hit"] = "none"
+    bgm_mode: Literal["off", "auto_library", "auto_mood", "pinned_asset"] = "off"
+    bgm_mood: Literal["dark_cinema", "upbeat_gaming", "suspense", "emotional", "any"] = "any"
+    bgm_asset_id: str = ""
+    dialogue_enhance: bool = False
+    auto_tighten_silence: bool = False
     reveal_mode: Literal["group", "progressive", "single_word"] = "progressive"
-    caption_style: Literal["bold_pop", "karaoke_fill", "clean_lower", "boxed"] = "bold_pop"
+    caption_style: Literal[
+        "bold_pop",
+        "karaoke_fill",
+        "clean_lower",
+        "boxed",
+        "cinema_neon_glow",
+        "viral_punch_glow",
+    ] = "bold_pop"
     burn_captions: bool = True
     censor_profanity: bool = True
+    margin_v_ratio: float = Field(default=0.22, ge=0.05, le=0.85)
     editor_boundaries: str = ""
     channel_urls: list[str] = Field(default_factory=list)
     keyword_filters: list[str] = Field(default_factory=list)
@@ -63,6 +89,80 @@ def default_profiles() -> list[CreatorProfile]:
             title_card_style="seam_card_white",
             cold_open_enabled=True,
             editor_boundaries="Keep the streamer webcam clearly visible on top in split-screen.",
+        ),
+        CreatorProfile(
+            id="cinema-tv-edits",
+            name="Cinema & TV Edits (JJ_EDIT Style)",
+            brief=(
+                "Extract dramatic movie and prestige TV scenes, cold realizations, tense "
+                "monologues, and multi-scene character arcs with strong emotional payoff."
+            ),
+            content_mode="cinema",
+            preferred_lang="en",
+            min_duration_s=18.0,
+            max_duration_s=180.0,
+            max_clips=6,
+            default_ratio="1:1",
+            layout_mode="auto_reframe",
+            fit_backdrop="black",
+            border_style="thin_rounded",
+            cinema_grade="crisp_hd",
+            title_card_style="pov_top_bar",
+            cold_open_enabled=False,
+            cta_mode="off",
+            watermark_text="CUTFLOW",
+            watermark_opacity=0.78,
+            show_cinema_credit=True,
+            transition_style="dip_black",
+            transition_sfx="cinema_hit",
+            bgm_mode="auto_mood",
+            bgm_mood="dark_cinema",
+            bgm_asset_id="dark_cinema_pulse",
+            dialogue_enhance=True,
+            auto_tighten_silence=False,
+            reveal_mode="group",
+            caption_style="cinema_neon_glow",
+            burn_captions=True,
+            censor_profanity=False,
+            margin_v_ratio=0.40,
+            editor_boundaries="Preserve dramatic pauses; never cut mid-sentence.",
+            auto_export=False,
+        ),
+        CreatorProfile(
+            id="viral-gaming-challenge",
+            name="Viral Gaming Challenge (MrBeast Style)",
+            brief=(
+                "Find high-stakes challenge climaxes, score/money reveals, fast banter, "
+                "and clutch wins with zero dead air."
+            ),
+            content_mode="stream",
+            preferred_lang="en",
+            min_duration_s=15.0,
+            max_duration_s=60.0,
+            max_clips=8,
+            default_ratio="9:16",
+            layout_mode="auto_reframe",
+            fit_backdrop="blur",
+            border_style="none",
+            cinema_grade="crisp_hd",
+            title_card_style="off",
+            cold_open_enabled=True,
+            cold_open_duration_ms=1400,
+            cta_mode="off",
+            transition_style="flash_white",
+            transition_sfx="whoosh_flash",
+            bgm_mode="auto_mood",
+            bgm_mood="upbeat_gaming",
+            bgm_asset_id="upbeat_challenge_drive",
+            dialogue_enhance=True,
+            auto_tighten_silence=True,
+            reveal_mode="progressive",
+            caption_style="viral_punch_glow",
+            burn_captions=True,
+            censor_profanity=True,
+            margin_v_ratio=0.40,
+            editor_boundaries="Tighten dead air aggressively; highlight numbers and stakes.",
+            auto_export=False,
         ),
         CreatorProfile(
             id="talking-head-podcast",
@@ -142,15 +242,27 @@ def delete_profile(profile_id: str) -> bool:
         return True
 
 
+_V03_STARTER_IDS = frozenset({"cinema-tv-edits", "viral-gaming-challenge"})
+
+
 def seed_and_import_profiles(*, autoclip_profiles_file: Path | None = None) -> list[CreatorProfile]:
-    """Seed starter profiles when empty and optionally import legacy AutoClip profiles."""
+    """Seed starter profiles and idempotently add v0.3 zero-touch presets on existing DBs."""
     existing = list_profiles()
     existing_ids = {p.id for p in existing}
+    v03_marker = paths.root() / ".seeded_v03_profiles"
+    v03_marker.parent.mkdir(parents=True, exist_ok=True)
 
     if not existing:
         for prof in default_profiles():
             upsert_profile(prof)
             existing_ids.add(prof.id)
+        v03_marker.write_text("1", encoding="utf-8")
+    elif not v03_marker.exists():
+        for prof in default_profiles():
+            if prof.id in _V03_STARTER_IDS and prof.id not in existing_ids:
+                upsert_profile(prof)
+                existing_ids.add(prof.id)
+        v03_marker.write_text("1", encoding="utf-8")
 
     legacy_path = autoclip_profiles_file or (Path.home() / ".autoclip" / "profiles.json")
     if legacy_path.exists():

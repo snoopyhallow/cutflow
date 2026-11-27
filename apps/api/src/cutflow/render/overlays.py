@@ -143,7 +143,8 @@ def _render_pov_top_bar(
 ) -> RenderedOverlay:
     """Render flush full-width white POV header bar (JJ_EDIT Cinema Square style)."""
     ss = 2
-    font_px_1x = max(20, int(round(out_w * 0.040)))
+    scale = max(0.4, min(2.5, float(getattr(overlay, "scale", 1.0) or 1.0)))
+    font_px_1x = max(16, int(round(out_w * 0.040 * scale)))
     font = _load_bold_font(font_px_1x * ss)
 
     pad_x = int(round(out_w * 0.05)) * ss
@@ -221,7 +222,8 @@ def _render_watermark_tag(
 ) -> RenderedOverlay:
     """Render translucent wide-spaced uppercase watermark with soft shadow (no pill box)."""
     ss = 2
-    font_px_1x = max(14, int(round(out_w * 0.026)))
+    scale = max(0.4, min(2.5, float(getattr(overlay, "scale", 1.0) or 1.0)))
+    font_px_1x = max(12, int(round(out_w * 0.026 * scale)))
     font = _load_bold_font(font_px_1x * ss)
     text_str = overlay.text.strip().upper()[:36] or "CUTFLOW"
     char_gap = max(2, int(round(font_px_1x * 0.24)) * ss)
@@ -309,19 +311,20 @@ def render_overlay_png(
         )
 
     ss = 2  # 2x supersampling for silky rounded corners & crisp typography
+    scale = max(0.4, min(2.5, float(getattr(overlay, "scale", 1.0) or 1.0)))
     if overlay.kind == "cinema_credit":
         font_scale = 0.029
     elif overlay.kind == "cta_pill":
         font_scale = 0.036
     else:
         font_scale = 0.044
-    font_px_1x = max(16, int(round(out_w * font_scale)))
+    font_px_1x = max(14, int(round(out_w * font_scale * scale)))
     font = _load_bold_font(font_px_1x * ss)
 
-    pad_x = int(round(out_w * (0.028 if overlay.kind == "cinema_credit" else 0.036))) * ss
-    pad_y = int(round(out_w * (0.014 if overlay.kind == "cinema_credit" else 0.022))) * ss
+    pad_x = int(round(out_w * (0.028 if overlay.kind == "cinema_credit" else 0.036) * scale)) * ss
+    pad_y = int(round(out_w * (0.014 if overlay.kind == "cinema_credit" else 0.022) * scale)) * ss
     shadow_pad = int(round(out_w * 0.022)) * ss
-    max_card_w = int(round(out_w * 0.88)) * ss
+    max_card_w = int(round(out_w * 0.92)) * ss
     max_text_w = max_card_w - (pad_x * 2)
 
     scratch = Image.new("RGBA", (16, 16), (0, 0, 0, 0))

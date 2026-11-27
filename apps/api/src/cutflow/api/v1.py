@@ -4,11 +4,13 @@ from __future__ import annotations
 
 import asyncio
 import json
+import mimetypes
+import os
 from collections.abc import AsyncIterator
 from pathlib import Path
 from typing import Any
 
-from fastapi import APIRouter, File, Form, HTTPException, Query, UploadFile
+from fastapi import APIRouter, File, Form, Header, HTTPException, Query, UploadFile
 from fastapi.responses import FileResponse, StreamingResponse
 from pydantic import BaseModel, Field
 from sqlalchemy import desc, select
@@ -21,6 +23,7 @@ from ..audio import (
     delete_bgm_asset,
     list_bgm_assets,
     resolve_bgm_asset_path,
+    resolve_sfx_path,
     save_uploaded_bgm,
 )
 from ..db import ClipProjectRow, ExportRow, FeedItemRow, JobRow, SourceRow, get_session
@@ -59,6 +62,12 @@ from ..workspace.archive import archive_source_vod, storage_summary
 from ..workspace.jobs import job_manager
 from ..workspace.mashup import create_mashup_project
 from ..workspace.profiles import CreatorProfile
+from ..workspace.projects import (
+    create_blank_project,
+    delete_clip_project,
+    duplicate_clip_project,
+    import_local_media_path,
+)
 
 router = APIRouter(prefix="/api/v1", tags=["v1"])
 
@@ -207,6 +216,30 @@ class SecretIn(BaseModel):
     value: str = Field(min_length=1)
 
 
+class LocalPathSourceIn(BaseModel):
+    path: str = Field(min_length=1)
+    profile_id: str | None = Field(default=None, alias="profileId")
+    auto_clip: bool = Field(default=False, alias="autoClip")
+    title: str = ""
+
+    model_config = {"populate_by_name": True}
+
+
+class BlankProjectCreateIn(BaseModel):
+    title: str = "Untitled Project"
+    ratio: str = "9:16"
+    source_id: str | None = Field(default=None, alias="sourceId")
+    local_path: str | None = Field(default=None, alias="localPath")
+    profile_id: str | None = Field(default=None, alias="profileId")
+
+    model_config = {"populate_by_name": True}
+
+
+class ProjectUpdateIn(BaseModel):
+    title: str | None = None
+    status: str | None = None
+
+
 def _source_dict(row: SourceRow) -> dict[str, Any]:
     return {
         "id": row.id,
@@ -242,11 +275,15 @@ def _job_dict(row: JobRow, *, source_title: str = "", clip_count: int = 0) -> di
     }
 
 
-def _project_summary(row: ClipProjectRow) -> dict[str, Any]:
+def _project_summary(row: ClipProjectRow, *, source_usable: bool = False) -> dict[str, Any]:
     edl = TimelineProject.model_validate(row.edl_json)
-    proxy_ok = bool(row.proxy_path and Path(row.proxy_path).is_file())
+    proxy_ok = bool(row.proxy_path and Path(row.proxy_path).is_file()) or source_usable
     peaks_ok = bool(row.peaks_path and Path(row.peaks_path).is_file())
-    clip_dir = Path(row.proxy_path).parent if row.proxy_path else None
+    clip_dir = (
+        Path(row.proxy_path).parent
+        if row.proxy_path
+        else (paths.work_dir() / row.source_id / "clips" / row.id)
+    )
     thumb_ok = bool(clip_dir and (clip_dir / "thumb.jpg").is_file())
     filmstrip_ok = bool(clip_dir and (clip_dir / "filmstrip.jpg").is_file())
     return {
@@ -546,6 +583,48 @@ def archive_source(source_id: str) -> dict[str, Any]:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
 
 
+@router.post("/sources/local-path", status_code=201)
+def ingest_local_path_source(
+    payload: LocalPathSourceIn,
+    x_cutflow_desktop_token: str | None = Header(default=None),
+) -> dict[str, Any]:
+    expected_token = os.environ.get("CUTFLOW_DESKTOP_TOKEN")
+    if expected_token and x_cutflow_desktop_token != expected_token:
+        raise HTTPException(
+            status_code=403,
+            detail="Desktop authorization token is required for direct local path import.",
+        )
+    try:
+        src, job = import_local_media_path(
+            payload.path,
+            profile_id=payload.profile_id,
+            auto_clip=payload.auto_clip,
+            title=payload.title,
+        )
+    except FileNotFoundError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+    job_out = _job_dict(job, source_title=src.title) if job is not None else None
+    if job_out is not None:
+        job_manager.submit(job_out["id"])
+    return {"source": _source_dict(src), "job": job_out}
+
+
+@router.get("/sources/{source_id}/media")
+def stream_source_media(source_id: str) -> FileResponse:
+    with get_session() as session:
+        src = session.get(SourceRow, source_id)
+        if src is None or src.archived or not src.path:
+            raise HTTPException(status_code=404, detail="Source media not available.")
+        media_file = Path(src.path)
+    if not media_file.is_file():
+        raise HTTPException(status_code=404, detail="Source media file missing on disk.")
+    mime, _ = mimetypes.guess_type(media_file.name)
+    return FileResponse(media_file, media_type=mime or "video/mp4")
+
+
 @router.get("/storage")
 def get_storage() -> dict[str, Any]:
     return storage_summary()
@@ -564,9 +643,7 @@ def list_jobs(limit: int = Query(default=25, ge=1, le=100)) -> list[dict[str, An
             clips = session.scalars(
                 select(ClipProjectRow.id).where(ClipProjectRow.job_id == row.id)
             ).all()
-            out.append(
-                _job_dict(row, source_title=src.title if src else "", clip_count=len(clips))
-            )
+            out.append(_job_dict(row, source_title=src.title if src else "", clip_count=len(clips)))
         return out
 
 
@@ -671,7 +748,75 @@ def list_projects(
         if source_id:
             stmt = stmt.where(ClipProjectRow.source_id == source_id)
         rows = session.scalars(stmt.limit(limit)).all()
-        return [_project_summary(r) for r in rows]
+        out: list[dict[str, Any]] = []
+        for r in rows:
+            src = session.get(SourceRow, r.source_id)
+            src_ok = bool(src and not src.archived and src.path and Path(src.path).is_file())
+            out.append(_project_summary(r, source_usable=src_ok))
+        return out
+
+
+@router.post("/projects/blank", status_code=201)
+def create_manual_blank_project(
+    payload: BlankProjectCreateIn,
+    x_cutflow_desktop_token: str | None = Header(default=None),
+) -> dict[str, Any]:
+    if payload.local_path:
+        expected_token = os.environ.get("CUTFLOW_DESKTOP_TOKEN")
+        if expected_token and x_cutflow_desktop_token != expected_token:
+            raise HTTPException(
+                status_code=403,
+                detail="Desktop authorization token is required for direct local path import.",
+            )
+    try:
+        return create_blank_project(
+            title=payload.title,
+            ratio=payload.ratio,  # type: ignore[arg-type]
+            source_id=payload.source_id,
+            local_path=payload.local_path,
+            profile_id=payload.profile_id,
+        )
+    except FileNotFoundError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+@router.patch("/projects/{project_id}")
+def patch_project_metadata(project_id: str, payload: ProjectUpdateIn) -> dict[str, Any]:
+    with get_session() as session:
+        row = session.get(ClipProjectRow, project_id)
+        if row is None:
+            raise HTTPException(status_code=404, detail="Clip project not found.")
+        edl = TimelineProject.model_validate(row.edl_json)
+        if payload.title is not None:
+            cleaned = payload.title.strip()[:200]
+            if cleaned:
+                row.title = cleaned
+                edl.title = cleaned
+        if payload.status in ("draft", "approved", "exported", "posted", "archived"):
+            row.status = payload.status
+            edl.status = payload.status  # type: ignore[assignment]
+        row.edl_json = edl.to_canonical_dict()
+        row.updated_at = utcnow_iso()
+        src = session.get(SourceRow, row.source_id)
+        src_ok = bool(src and not src.archived and src.path and Path(src.path).is_file())
+        return _project_summary(row, source_usable=src_ok)
+
+
+@router.post("/projects/{project_id}/duplicate", status_code=201)
+def duplicate_project_route(project_id: str) -> dict[str, Any]:
+    try:
+        dup_row = duplicate_clip_project(project_id)
+    except KeyError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    return _project_summary(dup_row, source_usable=True)
+
+
+@router.delete("/projects/{project_id}", status_code=204)
+def delete_project_route(project_id: str) -> None:
+    if not delete_clip_project(project_id):
+        raise HTTPException(status_code=404, detail="Clip project not found.")
 
 
 @router.post("/projects/mashup", status_code=201)
@@ -744,24 +889,37 @@ def get_project_media(project_id: str) -> FileResponse:
         if row is None:
             raise HTTPException(status_code=404, detail="Clip project not found.")
         raw_path = row.proxy_path
-    if not raw_path:
-        raise HTTPException(status_code=404, detail="Clip slice media is not available.")
-    try:
-        safe = safe_resolve(Path(raw_path), paths.work_dir())
-    except PathSandboxError as exc:
-        raise HTTPException(status_code=403, detail=str(exc)) from exc
-    if not safe.is_file():
-        raise HTTPException(status_code=404, detail="Clip slice file missing on disk.")
-    return FileResponse(safe, media_type="video/mp4")
+        src = session.get(SourceRow, row.source_id)
+        fallback_src_path = src.path if (src and not src.archived and src.path) else ""
+
+    if raw_path:
+        try:
+            safe = safe_resolve(Path(raw_path), paths.work_dir())
+            if safe.is_file():
+                return FileResponse(safe, media_type="video/mp4")
+        except PathSandboxError as exc:
+            raise HTTPException(status_code=403, detail=str(exc)) from exc
+
+    if fallback_src_path:
+        src_file = Path(fallback_src_path)
+        if src_file.is_file():
+            mime, _ = mimetypes.guess_type(src_file.name)
+            return FileResponse(src_file, media_type=mime or "video/mp4")
+
+    raise HTTPException(status_code=404, detail="Clip slice media is not available.")
 
 
 @router.get("/projects/{project_id}/thumb")
 def get_project_thumb(project_id: str) -> FileResponse:
     with get_session() as session:
         row = session.get(ClipProjectRow, project_id)
-        if row is None or not row.proxy_path:
+        if row is None:
             raise HTTPException(status_code=404, detail="Clip thumbnail not found.")
-        candidate = Path(row.proxy_path).parent / "thumb.jpg"
+        candidate = (
+            Path(row.proxy_path).parent / "thumb.jpg"
+            if row.proxy_path
+            else (paths.work_dir() / row.source_id / "clips" / row.id / "thumb.jpg")
+        )
     try:
         safe = safe_resolve(candidate, paths.work_dir())
     except PathSandboxError as exc:
@@ -775,9 +933,13 @@ def get_project_thumb(project_id: str) -> FileResponse:
 def get_project_filmstrip(project_id: str) -> FileResponse:
     with get_session() as session:
         row = session.get(ClipProjectRow, project_id)
-        if row is None or not row.proxy_path:
+        if row is None:
             raise HTTPException(status_code=404, detail="Clip filmstrip not found.")
-        candidate = Path(row.proxy_path).parent / "filmstrip.jpg"
+        candidate = (
+            Path(row.proxy_path).parent / "filmstrip.jpg"
+            if row.proxy_path
+            else (paths.work_dir() / row.source_id / "clips" / row.id / "filmstrip.jpg")
+        )
     try:
         safe = safe_resolve(candidate, paths.work_dir())
     except PathSandboxError as exc:
@@ -846,8 +1008,46 @@ def patch_project_edl(project_id: str, payload: EdlPatchIn) -> dict[str, Any]:
     }
 
 
+class CoEditorRequestIn(CoEditorIn):
+    selection: dict[str, Any] | None = None
+    provider: str | None = None
+    model: str | None = None
+
+
+class TranscribeProjectIn(BaseModel):
+    language: str = ""
+
+
+@router.get("/ai/models")
+async def get_ai_models() -> dict[str, Any]:
+    from ..ai import list_available_ai_models
+
+    return await asyncio.to_thread(list_available_ai_models)
+
+
+@router.post("/projects/{project_id}/transcribe")
+async def transcribe_project_route(
+    project_id: str, payload: TranscribeProjectIn | None = None
+) -> dict[str, Any]:
+    from ..workspace.projects import transcribe_clip_project
+
+    req = payload or TranscribeProjectIn()
+    try:
+        return await asyncio.to_thread(
+            transcribe_clip_project,
+            project_id,
+            language=req.language,
+        )
+    except KeyError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except FileNotFoundError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except RuntimeError as exc:
+        raise HTTPException(status_code=500, detail=str(exc)) from exc
+
+
 @router.post("/projects/{project_id}/coeditor")
-async def coeditor_project(project_id: str, payload: CoEditorIn) -> dict[str, Any]:
+async def coeditor_project(project_id: str, payload: CoEditorRequestIn) -> dict[str, Any]:
     with get_session() as session:
         row = session.get(ClipProjectRow, project_id)
         if row is None:
@@ -877,6 +1077,9 @@ async def coeditor_project(project_id: str, payload: CoEditorIn) -> dict[str, An
             payload.instruction,
             boundaries=effective_boundaries,
             playhead_ms=payload.playhead_ms,
+            selection=payload.selection,
+            provider_override=payload.provider,
+            model_override=payload.model,
         )
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
@@ -896,6 +1099,8 @@ async def coeditor_project(project_id: str, payload: CoEditorIn) -> dict[str, An
         "ops": result.ops,
         "reply": result.reply,
         "provider": result.provider,
+        "modelUsed": result.model_used,
+        "llmWarning": result.llm_warning,
         "boundaries": effective_boundaries,
         "totalDurationMs": TimelineMapper(result.edl).total_duration_ms,
     }
@@ -916,9 +1121,7 @@ def update_project_status(project_id: str, payload: ProjectStatusIn) -> dict[str
 
 
 @router.post("/projects/{project_id}/post-copy")
-async def project_post_copy(
-    project_id: str, payload: PostCopyIn | None = None
-) -> dict[str, Any]:
+async def project_post_copy(project_id: str, payload: PostCopyIn | None = None) -> dict[str, Any]:
     req = payload or PostCopyIn()
     with get_session() as session:
         row = session.get(ClipProjectRow, project_id)
@@ -1096,9 +1299,7 @@ def clip_feed_item(feed_id: str) -> dict[str, Any]:
         title = item.title
         item.status = "queued"
 
-    return ingest_url_source(
-        UrlSourceIn(url=url, profileId=profile_id, title=title, autoClip=True)
-    )
+    return ingest_url_source(UrlSourceIn(url=url, profileId=profile_id, title=title, autoClip=True))
 
 
 @router.post("/feed/{feed_id}/dismiss")
@@ -1132,6 +1333,34 @@ def get_bgm_library() -> list[dict[str, Any]]:
     return [_bgm_dict(a) for a in list_bgm_assets()]
 
 
+@router.get("/sfx")
+def get_sfx_library() -> list[dict[str, Any]]:
+    items: list[dict[str, Any]] = []
+    for sfx_id, label, dur_ms in (
+        ("whoosh_flash", "Whoosh Flash Transition", 420),
+        ("cinema_hit", "Cinema Sub Impact Hit", 900),
+    ):
+        sfx_path = resolve_sfx_path(sfx_id)
+        if sfx_path is not None and sfx_path.is_file():
+            items.append(
+                {
+                    "id": sfx_id,
+                    "name": label,
+                    "durationMs": dur_ms,
+                    "sizeBytes": sfx_path.stat().st_size,
+                }
+            )
+    return items
+
+
+@router.get("/sfx/{sfx_id}/media")
+def stream_sfx_media(sfx_id: str) -> FileResponse:
+    sfx_path = resolve_sfx_path(sfx_id)
+    if sfx_path is None or not sfx_path.is_file():
+        raise HTTPException(status_code=404, detail="SFX asset not found.")
+    return FileResponse(sfx_path, media_type="audio/wav", filename=sfx_path.name)
+
+
 @router.post("/bgm/upload", status_code=201)
 async def upload_bgm_track(
     file: UploadFile = File(...),
@@ -1143,9 +1372,7 @@ async def upload_bgm_track(
     if ext not in AUDIO_EXTENSIONS:
         allowed = ", ".join(sorted(AUDIO_EXTENSIONS))
         await file.close()
-        raise HTTPException(
-            status_code=400, detail=f"Unsupported audio type {ext}; use {allowed}."
-        )
+        raise HTTPException(status_code=400, detail=f"Unsupported audio type {ext}; use {allowed}.")
     try:
         payload = await file.read(64 * 1024 * 1024 + 1)
     finally:

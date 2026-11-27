@@ -41,7 +41,7 @@ const PROVIDERS: {
   {
     id: "gemini",
     label: "Google Gemini",
-    defaultModel: "gemini-2.5-flash",
+    defaultModel: "gemini-3.5-flash-lite",
     secretKey: "gemini",
     hint: "Long-context highlight scan, Co-Editor & vision",
   },
@@ -278,11 +278,23 @@ export function SettingsPage({
             })}
           </div>
 
+          <datalist id="cutflow-model-presets">
+            <option value="gemini-3.5-flash-lite" />
+            <option value="gemini-flash-lite-latest" />
+            <option value="gemini-3.1-flash-lite" />
+            <option value="gemma-4-26b-a4b-it" />
+            <option value="claude-sonnet-4-5" />
+            <option value="gpt-4o-mini" />
+            <option value="llama-3.3-70b-versatile" />
+            <option value="qwen2.5:7b" />
+          </datalist>
+
           <div className="grid gap-3 pt-1 sm:grid-cols-2">
             <label className="space-y-1 text-xs">
               <span className="text-[#A1A1AA]">Highlight &amp; Act Scan Model</span>
               <input
                 type="text"
+                list="cutflow-model-presets"
                 value={scanModel}
                 onChange={(e) => setScanModel(e.target.value)}
                 className="tabular-tc w-full rounded border border-[#222228] bg-[#09090B] px-2.5 py-1.5 text-xs text-[#F4F4F5] focus:border-[#F59E0B] focus:outline-none"
@@ -292,6 +304,7 @@ export function SettingsPage({
               <span className="text-[#A1A1AA]">Co-Editor &amp; Vision Model</span>
               <input
                 type="text"
+                list="cutflow-model-presets"
                 value={editorModel}
                 onChange={(e) => setEditorModel(e.target.value)}
                 className="tabular-tc w-full rounded border border-[#222228] bg-[#09090B] px-2.5 py-1.5 text-xs text-[#F4F4F5] focus:border-[#F59E0B] focus:outline-none"

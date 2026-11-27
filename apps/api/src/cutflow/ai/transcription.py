@@ -1,7 +1,8 @@
-"""Hybrid ASR transcription: Groq Whisper, local faster-whisper (with VRAM cleanup), or OpenAI."""
+"""Hybrid ASR transcription: Groq, GTX 1050 Ti int8 faster-whisper, OpenAI, or Gemini Audio."""
 
 from __future__ import annotations
 
+import base64
 import gc
 import logging
 import tempfile
@@ -15,8 +16,15 @@ from .. import config
 from ..audio.align import WordTiming
 from ..security import get_secret
 from .hype import HotWindow
+from .llm import parse_json_payload
 
 log = logging.getLogger(__name__)
+
+_GEMINI_AUDIO_MODELS: tuple[str, ...] = (
+    "gemini-3.5-flash-lite",
+    "gemini-flash-lite-latest",
+    "gemini-3.1-flash-lite",
+)
 
 
 @dataclass(slots=True)
@@ -67,6 +75,45 @@ def _segments_from_words(
     return segments
 
 
+def _words_from_segment_span(text: str, start_ms: int, end_ms: int) -> list[WordTiming]:
+    """Distribute tokens proportionally across ``[start_ms, end_ms]`` when word stops are absent."""
+    tokens = [tok for tok in text.strip().split() if tok]
+    if not tokens:
+        return []
+    span = max(len(tokens) * 70, end_ms - start_ms)
+    total_chars = max(1, sum(max(1, len(t)) for t in tokens))
+    cursor = start_ms
+    out: list[WordTiming] = []
+    for idx, tok in enumerate(tokens):
+        weight = max(1, len(tok)) / total_chars
+        dur = max(65, int(round(span * weight)))
+        w_end = end_ms if idx == len(tokens) - 1 else min(end_ms, cursor + dur)
+        w_end = max(cursor + 60, w_end)
+        out.append(WordTiming(text=tok, start_ms=cursor, end_ms=w_end))
+        cursor = min(max(start_ms, end_ms - 60), w_end)
+    return out
+
+
+def select_faster_whisper_targets() -> list[tuple[str, str]]:
+    """Return ordered ``(device, compute_type)`` targets safe for Pascal GPUs & CPU."""
+    targets: list[tuple[str, str]] = []
+    try:
+        import ctranslate2  # type: ignore[import-not-found]
+
+        if ctranslate2.get_cuda_device_count() > 0:
+            supported = set(ctranslate2.get_supported_compute_types("cuda"))
+            if "float16" in supported:
+                targets.append(("cuda", "float16"))
+            elif "int8" in supported:
+                targets.append(("cuda", "int8"))
+            else:
+                targets.append(("cuda", "float32"))
+    except Exception:
+        pass
+    targets.append(("cpu", "int8"))
+    return targets
+
+
 def _transcribe_cloud_whisper(
     wav_path: Path,
     *,
@@ -114,7 +161,11 @@ def _transcribe_cloud_whisper(
                 continue
             s_ms = max(0, int(round(float(seg.get("start", 0.0)) * 1000.0)))
             e_ms = max(s_ms + 100, int(round(float(seg.get("end", s_ms / 1000.0)) * 1000.0)))
-            segments.append(TranscriptSegment(start_ms=s_ms, end_ms=e_ms, text=text, words=[]))
+            seg_words = _words_from_segment_span(text, s_ms, e_ms)
+            words.extend(seg_words)
+            segments.append(
+                TranscriptSegment(start_ms=s_ms, end_ms=e_ms, text=text, words=seg_words)
+            )
 
     return TranscriptResult(
         language=str(payload.get("language") or language or "en"),
@@ -135,74 +186,163 @@ def _transcribe_faster_whisper(
 ) -> TranscriptResult:
     from faster_whisper import WhisperModel  # type: ignore[import-not-found]
 
-    device = "cpu"
-    compute_type = "int8"
-    try:
-        import ctranslate2  # type: ignore[import-not-found]
-
-        if ctranslate2.get_cuda_device_count() > 0:
-            device = "cuda"
-            compute_type = "float16"
-    except Exception:
-        pass
-
-    model = WhisperModel(model_size, device=device, compute_type=compute_type)
-    try:
-        seg_iter, info = model.transcribe(
-            str(wav_path),
-            language=language or None,
-            word_timestamps=True,
-            vad_filter=False,
-            no_speech_threshold=no_speech_threshold,
-            log_prob_threshold=log_prob_threshold,
-            initial_prompt=initial_prompt or None,
-        )
-        segments: list[TranscriptSegment] = []
-        all_words: list[WordTiming] = []
-        for seg in seg_iter:
-            seg_words: list[WordTiming] = []
-            for w in getattr(seg, "words", None) or []:
-                token = str(getattr(w, "word", "")).strip()
-                if not token:
-                    continue
-                s_ms = max(0, int(round(float(w.start) * 1000.0)))
-                e_ms = max(s_ms + 60, int(round(float(w.end) * 1000.0)))
-                wt = WordTiming(
-                    text=token,
-                    start_ms=s_ms,
-                    end_ms=e_ms,
-                    confidence=getattr(w, "probability", None),
-                )
-                seg_words.append(wt)
-                all_words.append(wt)
-            text = str(getattr(seg, "text", "")).strip()
-            if text:
-                segments.append(
-                    TranscriptSegment(
-                        start_ms=max(0, int(round(float(seg.start) * 1000.0))),
-                        end_ms=max(100, int(round(float(seg.end) * 1000.0))),
-                        text=text,
-                        words=seg_words,
-                    )
-                )
-        lang = str(getattr(info, "language", "") or language or "en")
-        return TranscriptResult(
-            language=lang,
-            provider=f"faster_whisper:{device}:{model_size}",
-            segments=segments,
-            words=all_words,
-        )
-    finally:
-        # Release 4 GB GTX 1050 Ti VRAM immediately before clip-scoped forced alignment
-        del model
-        gc.collect()
+    last_exc: Exception | None = None
+    for device, compute_type in select_faster_whisper_targets():
+        model = None
         try:
-            import torch  # type: ignore[import-not-found]
+            model = WhisperModel(model_size, device=device, compute_type=compute_type)
+            seg_iter, info = model.transcribe(
+                str(wav_path),
+                language=language or None,
+                word_timestamps=True,
+                vad_filter=True,
+                no_speech_threshold=no_speech_threshold,
+                log_prob_threshold=log_prob_threshold,
+                initial_prompt=initial_prompt or None,
+            )
+            segments: list[TranscriptSegment] = []
+            all_words: list[WordTiming] = []
+            for seg in seg_iter:
+                seg_words: list[WordTiming] = []
+                for w in getattr(seg, "words", None) or []:
+                    token = str(getattr(w, "word", "")).strip()
+                    if not token:
+                        continue
+                    s_ms = max(0, int(round(float(w.start) * 1000.0)))
+                    e_ms = max(s_ms + 60, int(round(float(w.end) * 1000.0)))
+                    wt = WordTiming(
+                        text=token,
+                        start_ms=s_ms,
+                        end_ms=e_ms,
+                        confidence=getattr(w, "probability", None),
+                    )
+                    seg_words.append(wt)
+                    all_words.append(wt)
+                text = str(getattr(seg, "text", "")).strip()
+                if text:
+                    s_seg = max(0, int(round(float(seg.start) * 1000.0)))
+                    e_seg = max(s_seg + 100, int(round(float(seg.end) * 1000.0)))
+                    if not seg_words:
+                        seg_words = _words_from_segment_span(text, s_seg, e_seg)
+                        all_words.extend(seg_words)
+                    segments.append(
+                        TranscriptSegment(
+                            start_ms=s_seg,
+                            end_ms=e_seg,
+                            text=text,
+                            words=seg_words,
+                        )
+                    )
+            lang = str(getattr(info, "language", "") or language or "en")
+            return TranscriptResult(
+                language=lang,
+                provider=f"faster_whisper:{device}:{compute_type}:{model_size}",
+                segments=segments,
+                words=all_words,
+            )
+        except Exception as exc:
+            last_exc = exc
+            log.info(
+                "faster-whisper (%s/%s) unavailable (%s); trying next target.",
+                device,
+                compute_type,
+                exc,
+            )
+        finally:
+            if model is not None:
+                del model
+            gc.collect()
+            try:
+                import torch  # type: ignore[import-not-found]
 
-            if torch.cuda.is_available():
-                torch.cuda.empty_cache()
-        except Exception:
-            pass
+                if torch.cuda.is_available():
+                    torch.cuda.empty_cache()
+            except Exception:
+                pass
+
+    raise RuntimeError(f"faster-whisper failed across all targets: {last_exc}")
+
+
+def _transcribe_gemini_audio(
+    wav_path: Path,
+    *,
+    api_key: str,
+    language: str,
+    initial_prompt: str = "",
+) -> TranscriptResult:
+    """Multimodal Gemini WAV transcription fallback when Whisper engines are unavailable."""
+    audio_b64 = base64.b64encode(wav_path.read_bytes()).decode("ascii")
+    lang_hint = f" Expected language: {language}." if language else ""
+    ctx_hint = f" Context/terms: {initial_prompt[:250]}." if initial_prompt else ""
+    prompt = (
+        "Transcribe all spoken dialogue in this audio accurately with precise start and end "
+        "timestamps in seconds." + lang_hint + ctx_hint + " Return STRICT JSON: "
+        '{"language": "en", "segments": [{"start": 0.0, "end": 1.8, "text": "spoken phrase"}]}. '
+        'If there is no speech, return {"language": "en", "segments": []}.'
+    )
+    body = {
+        "contents": [
+            {
+                "role": "user",
+                "parts": [
+                    {"text": prompt},
+                    {"inline_data": {"mime_type": "audio/wav", "data": audio_b64}},
+                ],
+            }
+        ],
+        "generationConfig": {
+            "temperature": 0.1,
+            "responseMimeType": "application/json",
+        },
+    }
+
+    last_exc: Exception | None = None
+    with httpx.Client(timeout=120.0) as client:
+        for candidate in _GEMINI_AUDIO_MODELS:
+            url = (
+                f"https://generativelanguage.googleapis.com/v1beta/models/"
+                f"{candidate}:generateContent"
+            )
+            try:
+                resp = client.post(url, params={"key": api_key}, json=body)
+                if resp.status_code in (404, 429, 503):
+                    last_exc = RuntimeError(f"Gemini {candidate} HTTP {resp.status_code}")
+                    continue
+                resp.raise_for_status()
+                cands = resp.json().get("candidates") or []
+                if not cands:
+                    continue
+                raw_text = str(cands[0]["content"]["parts"][0]["text"])
+                parsed = parse_json_payload(raw_text)
+                if not isinstance(parsed, dict):
+                    continue
+                segments: list[TranscriptSegment] = []
+                all_words: list[WordTiming] = []
+                for item in parsed.get("segments") or []:
+                    if not isinstance(item, dict):
+                        continue
+                    txt = str(item.get("text") or "").strip()
+                    if not txt:
+                        continue
+                    s_ms = max(0, int(round(float(item.get("start", 0.0)) * 1000.0)))
+                    e_ms = max(
+                        s_ms + 120, int(round(float(item.get("end", s_ms / 1000.0 + 1.0)) * 1000.0))
+                    )
+                    seg_words = _words_from_segment_span(txt, s_ms, e_ms)
+                    all_words.extend(seg_words)
+                    segments.append(
+                        TranscriptSegment(start_ms=s_ms, end_ms=e_ms, text=txt, words=seg_words)
+                    )
+                return TranscriptResult(
+                    language=str(parsed.get("language") or language or "en"),
+                    provider=f"gemini:{candidate}",
+                    segments=segments,
+                    words=all_words,
+                )
+            except Exception as exc:
+                last_exc = exc
+                continue
+    raise RuntimeError(f"Gemini audio transcription failed: {last_exc}")
 
 
 def transcribe_wav(
@@ -211,13 +351,14 @@ def transcribe_wav(
     initial_prompt: str = "",
     settings: config.Settings | None = None,
 ) -> TranscriptResult:
-    """Transcribe a 16kHz WAV file using Groq -> local faster-whisper -> OpenAI -> graceful noop."""
+    """Transcribe a 16kHz WAV file via Groq -> faster-whisper (int8) -> OpenAI -> Gemini Audio."""
     cfg = settings or config.load()
     align_cfg = cfg.alignment
+    file_size = wav_path.stat().st_size
 
     # 1. Groq Whisper (ultra-fast cloud ASR when groq key is configured and file <= 24 MB)
     groq_key = get_secret("groq")
-    if groq_key and wav_path.stat().st_size <= 24 * 1024 * 1024:
+    if groq_key and file_size <= 24 * 1024 * 1024:
         try:
             return _transcribe_cloud_whisper(
                 wav_path,
@@ -231,24 +372,24 @@ def transcribe_wav(
         except Exception as exc:
             log.warning("Groq Whisper failed (%s); falling back.", exc)
 
-    # 2. Local faster-whisper
+    # 2. Local faster-whisper (GTX 1050 Ti int8 / CPU int8 automatic fallback)
     try:
         return _transcribe_faster_whisper(
             wav_path,
-            model_size=align_cfg.whisper_model,
+            model_size=align_cfg.whisper_model or "small",
             language=align_cfg.language,
             initial_prompt=initial_prompt,
             no_speech_threshold=align_cfg.no_speech_threshold,
             log_prob_threshold=align_cfg.log_prob_threshold,
         )
     except ImportError:
-        log.info("faster-whisper is not installed; checking OpenAI fallback.")
+        log.info("faster-whisper is not installed; checking cloud fallbacks.")
     except Exception as exc:
-        log.warning("Local faster-whisper failed (%s); checking fallback.", exc)
+        log.warning("Local faster-whisper failed (%s); checking cloud fallbacks.", exc)
 
     # 3. OpenAI Whisper fallback
     openai_key = get_secret("openai")
-    if openai_key and wav_path.stat().st_size <= 24 * 1024 * 1024:
+    if openai_key and file_size <= 24 * 1024 * 1024:
         try:
             return _transcribe_cloud_whisper(
                 wav_path,
@@ -262,6 +403,19 @@ def transcribe_wav(
         except Exception as exc:
             log.warning("OpenAI Whisper failed (%s).", exc)
 
+    # 4. Google Gemini Multimodal Audio fallback
+    gemini_key = get_secret("gemini")
+    if gemini_key and file_size <= 18 * 1024 * 1024:
+        try:
+            return _transcribe_gemini_audio(
+                wav_path,
+                api_key=gemini_key,
+                language=align_cfg.language,
+                initial_prompt=initial_prompt,
+            )
+        except Exception as exc:
+            log.warning("Gemini audio transcription failed (%s).", exc)
+
     return TranscriptResult(
         language=align_cfg.language or "en",
         provider="none",
@@ -271,7 +425,7 @@ def transcribe_wav(
 
 
 def _slice_wav_segment(src_wav: Path, dest_wav: Path, start_ms: int, end_ms: int) -> Path:
-    """Slice `[start_ms, end_ms]` out of a 16-bit PCM WAV file purely in Python (0 subprocesses)."""
+    """Slice ``[start_ms, end_ms]`` out of a 16-bit PCM WAV file purely in Python."""
     with wave.open(str(src_wav), "rb") as reader:
         params = reader.getparams()
         sr = params.framerate
@@ -296,20 +450,15 @@ def transcribe_hot_windows(
     settings: config.Settings | None = None,
     transcriber_fn=None,
 ) -> TranscriptResult:
-    """Transcribe either the full WAV or only selected multi-signal hot windows on long VODs.
-
-    Offsets window-local word and segment timestamps back into absolute source milliseconds,
-    keeping 3-hour VOD scans fast on 4 GB VRAM and within cloud 24 MB upload limits.
-    """
+    """Transcribe either the full WAV or only selected multi-signal hot windows on long VODs."""
     runner = transcriber_fn or transcribe_wav
     if not windows:
         return runner(wav_path, initial_prompt=initial_prompt, settings=settings)
 
-    # Single full-span window that fits comfortably -> transcribe directly without copying
     if (
         len(windows) == 1
         and windows[0].start_ms == 0
-        and wav_path.stat().st_size <= 23 * 1024 * 1024
+        and wav_path.stat().st_size <= 18 * 1024 * 1024
     ):
         return runner(wav_path, initial_prompt=initial_prompt, settings=settings)
 
@@ -414,7 +563,6 @@ def chunk_compact_transcript(
             chunks.append("\n".join(bucket))
             if len(chunks) >= max_chunks:
                 return chunks
-            # Keep 2-line overlap across Act boundaries so cross-boundary scenes stay intact
             overlap = bucket[-2:] if len(bucket) >= 2 else bucket[-1:]
             bucket = list(overlap)
             bucket_len = sum(len(x) + 1 for x in bucket)

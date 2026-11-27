@@ -25,11 +25,11 @@ class ModelRoutingSettings(BaseModel):
     """Optional dual-model routing (fast scan model vs smarter Co-Editor/Vision model)."""
 
     active_provider: ProviderName = "gemini"
-    scan_model: str = "gemini-2.5-flash"
-    editor_model: str = "gemini-2.5-flash"
+    scan_model: str = "gemini-3.5-flash-lite"
+    editor_model: str = "gemini-3.5-flash-lite"
     providers: dict[str, ProviderConfig] = Field(
         default_factory=lambda: {
-            "gemini": ProviderConfig(model="gemini-2.5-flash"),
+            "gemini": ProviderConfig(model="gemini-3.5-flash-lite"),
             "openai": ProviderConfig(model="gpt-4o-mini"),
             "anthropic": ProviderConfig(model="claude-sonnet-4-5"),
             "groq": ProviderConfig(model="llama-3.3-70b-versatile"),
@@ -39,7 +39,7 @@ class ModelRoutingSettings(BaseModel):
 
 
 class AlignmentSettings(BaseModel):
-    whisper_model: str = "medium"
+    whisper_model: str = "small"
     language: str = ""
     forced_aligner: Literal["auto", "stable_ts", "onset_only"] = "auto"
     no_speech_threshold: float = 0.8

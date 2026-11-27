@@ -1,0 +1,16 @@
+appId: com.cutflow.studio
+productName: CutFlow Studio
+directories:
+  output: release
+files:
+  - src/**/*
+  - package.json
+extraResources:
+  - from: ../web/dist
+    to: web-dist
+    filter:
+      - "**/*"
+win:
+  target:
+    - dir
+  signAndEditExecutable: false

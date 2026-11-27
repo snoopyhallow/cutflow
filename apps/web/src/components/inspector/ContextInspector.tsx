@@ -1,11 +1,15 @@
 import { useRef, useState } from "react";
 import {
   CircleNotch,
+  Copy,
   Export,
   FrameCorners,
+  MusicNotes,
   MusicNotesPlus,
+  PictureInPicture,
   Plus,
   PushPin,
+  Snowflake,
   SpeakerHigh,
   SplitVertical,
   Stack,
@@ -25,6 +29,7 @@ import {
   type InspectorContext,
 } from "../../state/timelineStore";
 import type { BgmAssetItem, StudioTransport } from "../../transport";
+import { formatDbLabel } from "../../utils/audioMath";
 import {
   ScrubNumber,
   ScrubSlider,
@@ -65,6 +70,8 @@ const PUNCH_GLOW_SWATCHES = [
   { label: "Rose", hex: "#F472B6" },
 ];
 
+const SPEED_PRESETS = [0.5, 1, 1.25, 1.5, 2];
+
 export function ContextInspector({
   transport,
   bgmAssets,
@@ -82,14 +89,25 @@ export function ContextInspector({
     selectedWordId,
     selectedOverlayId,
     selectedClipId,
+    selectedBrollId,
+    selectedAudioClipId,
     lastActionLabel,
     setInspectorContext,
     selectOverlay,
     selectClip,
+    selectBroll,
+    selectAudioClip,
     mutateEdl,
     updateFraming,
     updateAudio,
     updateBgm,
+    updateClipProps,
+    insertFreezeFrame,
+    detachAudioFromClip,
+    updateBroll,
+    removeBroll,
+    updateAudioClip,
+    removeAudioClip,
     updateSliceTransition,
     splitFramingAtPlayhead,
     setWordTiming,
@@ -97,6 +115,7 @@ export function ContextInspector({
     removeWord,
     updateOverlay,
     addOverlay,
+    duplicateOverlay,
     removeOverlay,
   } = useTimelineStore();
 
@@ -116,6 +135,12 @@ export function ContextInspector({
     edl.tracks.video.clips.find((c) => c.id === selectedClipId) ??
     edl.tracks.video.clips[0] ??
     null;
+  const brollList = edl.tracks.video.broll ?? [];
+  const activeBroll =
+    brollList.find((b) => b.id === selectedBrollId) ?? brollList[0] ?? null;
+  const audioClips = edl.tracks.audio.clips ?? [];
+  const activeAudioClip =
+    audioClips.find((a) => a.id === selectedAudioClipId) ?? audioClips[0] ?? null;
   const bgm = edl.tracks.audio.bgm ?? null;
 
   async function handleBgmUpload(file: File) {
@@ -138,7 +163,7 @@ export function ContextInspector({
   }
 
   return (
-    <section className="flex h-full flex-col border-l border-[#222228] bg-[#111114]">
+    <section className="flex h-full flex-col bg-[#111114]">
       {/* 5-Tab Studio Strip */}
       <div className="grid grid-cols-5 border-b border-[#222228] bg-[#0C0C0F]">
         {INSPECTOR_TABS.map((tab) => {
@@ -164,7 +189,7 @@ export function ContextInspector({
 
       {/* Inspector Controls Body */}
       <div className="flex-1 space-y-4 overflow-y-auto p-3 text-xs">
-        {/* 1. FRAME TAB */}
+        {/* 1. FRAME & CLIP TAB */}
         {inspectorContext === "framing" && framing && (
           <>
             <div className="space-y-1.5">
@@ -278,33 +303,91 @@ export function ContextInspector({
               )}
             </div>
 
-            {/* Scene Slice & Cut Transitions */}
-            {edl.tracks.video.clips.length >= 2 && activeClip && (
-              <div className="space-y-2.5 border-t border-[#222228] pt-3">
+            {/* Selected V1 Clip Speed, Reverse, Freeze & Transition Controls */}
+            {activeClip && (
+              <div className="space-y-3 border-t border-[#222228] pt-3">
                 <div className="flex items-center justify-between">
-                  <span className="text-[11px] font-medium text-[#A1A1AA]">
-                    Scene Cut Transitions
+                  <span className="text-[11px] font-semibold uppercase tracking-wider text-[#71717A]">
+                    Selected Clip · Track V1
                   </span>
                   <span className="tabular-tc text-[10px] text-[#71717A]">
-                    {edl.tracks.video.clips.length} scenes
+                    {edl.tracks.video.clips.length}{" "}
+                    {edl.tracks.video.clips.length === 1 ? "clip" : "clips"}
                   </span>
                 </div>
 
-                <StudioSelect
-                  ariaLabel="Selected Video Scene"
-                  value={activeClip.id}
-                  onChange={(cid) => selectClip(cid)}
-                  options={edl.tracks.video.clips.map((c, idx) => ({
-                    value: c.id,
-                    label: c.label || `Scene ${idx + 1}`,
-                    hint: `${((c.sourceEndMs - c.sourceStartMs) / 1000).toFixed(1)}s`,
-                  }))}
-                />
+                {edl.tracks.video.clips.length > 1 && (
+                  <StudioSelect
+                    ariaLabel="Selected Video Clip"
+                    value={activeClip.id}
+                    onChange={(cid) => selectClip(cid)}
+                    options={edl.tracks.video.clips.map((c, idx) => ({
+                      value: c.id,
+                      label: c.label || `Scene ${idx + 1}`,
+                      hint: `${((c.sourceEndMs - c.sourceStartMs) / 1000 / (c.speed ?? 1)).toFixed(1)}s`,
+                    }))}
+                  />
+                )}
 
-                {edl.tracks.video.clips[0]?.id !== activeClip.id && (
-                  <div className="space-y-2 rounded-md border border-[#222228] bg-[#09090B]/60 p-2.5">
-                    <div className="space-y-1">
-                      <span className="text-[10px] text-[#A1A1AA]">Incoming Cut Style</span>
+                <div className="space-y-2.5 rounded-md border border-[#222228] bg-[#09090B]/70 p-2.5">
+                  <ScrubSlider
+                    label="Clip Speed"
+                    min={0.25}
+                    max={4.0}
+                    step={0.05}
+                    value={activeClip.speed ?? 1}
+                    displayValue={`${(activeClip.speed ?? 1).toFixed(2)}×`}
+                    onChange={(spd) => updateClipProps(activeClip.id, { speed: spd })}
+                  />
+
+                  <div className="flex items-center gap-1">
+                    {SPEED_PRESETS.map((spd) => (
+                      <button
+                        key={spd}
+                        type="button"
+                        onClick={() => updateClipProps(activeClip.id, { speed: spd })}
+                        className={`tabular-tc flex-1 rounded border py-0.5 text-[10px] font-semibold ${
+                          Math.abs((activeClip.speed ?? 1) - spd) < 0.03
+                            ? "border-[#F59E0B] bg-[#F59E0B]/15 text-[#F4F4F5]"
+                            : "border-[#22222A] bg-[#141418] text-[#A1A1AA] hover:text-white"
+                        }`}
+                      >
+                        {spd}×
+                      </button>
+                    ))}
+                  </div>
+
+                  <StudioToggle
+                    label="Reverse Playback"
+                    checked={Boolean(activeClip.reverse)}
+                    onChange={(rev) => updateClipProps(activeClip.id, { reverse: rev })}
+                  />
+
+                  <div className="grid grid-cols-2 gap-1.5">
+                    <button
+                      type="button"
+                      onClick={() => insertFreezeFrame(playheadMs, 1500)}
+                      className="inline-flex items-center justify-center gap-1 rounded border border-[#2C2C36] bg-[#16161D] px-2 py-1 text-[10px] font-medium text-[#E4E4E7] hover:border-[#38BDF8]/60"
+                    >
+                      <Snowflake className="h-3 w-3 text-[#38BDF8]" />
+                      Freeze 1.5s
+                    </button>
+                    <button
+                      type="button"
+                      disabled={Boolean(activeClip.audioDetached)}
+                      onClick={() => detachAudioFromClip(activeClip.id)}
+                      className="inline-flex items-center justify-center gap-1 rounded border border-[#2C2C36] bg-[#16161D] px-2 py-1 text-[10px] font-medium text-[#E4E4E7] hover:border-[#F59E0B]/60 disabled:opacity-40"
+                    >
+                      <MusicNotes className="h-3 w-3 text-[#F59E0B]" />
+                      {activeClip.audioDetached ? "Detached" : "Detach Audio"}
+                    </button>
+                  </div>
+
+                  {edl.tracks.video.clips[0]?.id !== activeClip.id && (
+                    <div className="space-y-2 border-t border-[#1E1E24] pt-2">
+                      <span className="block text-[10px] text-[#A1A1AA]">
+                        Incoming Cut Transition
+                      </span>
                       <SegmentedControl
                         size="xs"
                         value={activeClip.transitionIn ?? "none"}
@@ -319,41 +402,110 @@ export function ContextInspector({
                           { value: "dip_black", label: "Dip Black" },
                         ]}
                       />
-                    </div>
 
-                    <div className="grid grid-cols-2 gap-2">
-                      <div>
-                        <span className="mb-1 block text-[10px] text-[#A1A1AA]">SFX Hit</span>
-                        <StudioSelect
-                          value={activeClip.transitionSfx ?? "none"}
-                          onChange={(sfx) =>
+                      <div className="grid grid-cols-2 gap-2">
+                        <div>
+                          <span className="mb-1 block text-[10px] text-[#A1A1AA]">SFX Hit</span>
+                          <StudioSelect
+                            value={activeClip.transitionSfx ?? "none"}
+                            onChange={(sfx) =>
+                              updateSliceTransition(activeClip.id, {
+                                transitionSfx: sfx as VideoSlice["transitionSfx"],
+                              })
+                            }
+                            options={[
+                              { value: "none", label: "Silent" },
+                              { value: "whoosh_flash", label: "Whoosh" },
+                              { value: "cinema_hit", label: "Sub Hit" },
+                            ]}
+                          />
+                        </div>
+                        <ScrubNumber
+                          label="Duration"
+                          unit="ms"
+                          min={80}
+                          max={800}
+                          step={20}
+                          value={activeClip.transitionDurationMs ?? 240}
+                          onChange={(ms) =>
                             updateSliceTransition(activeClip.id, {
-                              transitionSfx: sfx as VideoSlice["transitionSfx"],
+                              transitionDurationMs: ms,
                             })
                           }
-                          options={[
-                            { value: "none", label: "Silent" },
-                            { value: "whoosh_flash", label: "Whoosh" },
-                            { value: "cinema_hit", label: "Sub Hit" },
-                          ]}
                         />
                       </div>
-                      <ScrubNumber
-                        label="Duration"
-                        unit="ms"
-                        min={80}
-                        max={800}
-                        step={20}
-                        value={activeClip.transitionDurationMs ?? 240}
-                        onChange={(ms) =>
-                          updateSliceTransition(activeClip.id, {
-                            transitionDurationMs: ms,
-                          })
-                        }
-                      />
                     </div>
-                  </div>
+                  )}
+                </div>
+              </div>
+            )}
+
+            {/* V2 B-Roll Picture-in-Picture Inspector */}
+            {activeBroll && (
+              <div className="space-y-2.5 border-t border-[#222228] pt-3">
+                <div className="flex items-center justify-between">
+                  <span className="inline-flex items-center gap-1 text-[11px] font-semibold uppercase tracking-wider text-[#38BDF8]">
+                    <PictureInPicture className="h-3.5 w-3.5" />
+                    B-Roll PiP · Track V2
+                  </span>
+                  <button
+                    type="button"
+                    onClick={() => removeBroll(activeBroll.id)}
+                    className="text-[#A1A1AA] hover:text-[#EF4444]"
+                    title="Delete B-Roll clip"
+                  >
+                    <Trash className="h-3.5 w-3.5" />
+                  </button>
+                </div>
+
+                {brollList.length > 1 && (
+                  <StudioSelect
+                    ariaLabel="Selected B-Roll"
+                    value={activeBroll.id}
+                    onChange={(bid) => selectBroll(bid)}
+                    options={brollList.map((b, i) => ({
+                      value: b.id,
+                      label: b.label || `B-Roll ${i + 1}`,
+                    }))}
+                  />
                 )}
+
+                <div className="space-y-2.5 rounded-md border border-[#222228] bg-[#09090B]/70 p-2.5">
+                  <ScrubSlider
+                    label="PiP Opacity"
+                    min={10}
+                    max={100}
+                    step={5}
+                    value={Math.round((activeBroll.opacity ?? 1) * 100)}
+                    displayValue={`${Math.round((activeBroll.opacity ?? 1) * 100)}%`}
+                    onChange={(op) => updateBroll(activeBroll.id, { opacity: op / 100 })}
+                  />
+                  <ScrubSlider
+                    label="PiP Width"
+                    min={15}
+                    max={100}
+                    step={1}
+                    value={Math.round((activeBroll.box?.w ?? 0.4) * 100)}
+                    displayValue={`${Math.round((activeBroll.box?.w ?? 0.4) * 100)}%`}
+                    onChange={(w) => {
+                      const prev = activeBroll.box ?? { x: 0.56, y: 0.06, w: 0.38, h: 0.28 };
+                      updateBroll(activeBroll.id, {
+                        box: { ...prev, w: w / 100, h: Math.min(1, (w / 100) * 0.75) },
+                      });
+                    }}
+                  />
+                  <ScrubSlider
+                    label="B-Roll Gain"
+                    min={-60}
+                    max={12}
+                    step={0.5}
+                    value={activeBroll.gainDb ?? -60}
+                    displayValue={formatDbLabel(activeBroll.gainDb ?? -60)}
+                    onChange={(db) =>
+                      updateBroll(activeBroll.id, { gainDb: db, muted: db <= -59.5 })
+                    }
+                  />
+                </div>
               </div>
             )}
 
@@ -404,23 +556,47 @@ export function ContextInspector({
           </>
         )}
 
-        {/* 2. AUDIO & BGM TAB */}
+        {/* 2. AUDIO, CLIP GAIN & BGM TAB */}
         {inspectorContext === "audio" && (
           <>
             <div className="space-y-3">
               <span className="block text-[11px] font-semibold uppercase tracking-wider text-[#71717A]">
-                Dialogue &amp; Source Stem
+                Dialogue &amp; Source Stem (Track V1/A1)
               </span>
 
               <ScrubSlider
                 label="Dialogue Gain"
-                min={-12}
+                min={-60}
                 max={12}
                 step={0.5}
                 value={edl.tracks.audio.gainDb}
-                displayValue={`${edl.tracks.audio.gainDb >= 0 ? "+" : ""}${edl.tracks.audio.gainDb.toFixed(1)} dB`}
+                displayValue={formatDbLabel(edl.tracks.audio.gainDb)}
                 onChange={(v) => updateAudio({ gainDb: v })}
               />
+
+              <div className="grid grid-cols-4 gap-1">
+                {(
+                  [
+                    [-60, "Mute -∞"],
+                    [-12, "-12 dB"],
+                    [0, "0 dB"],
+                    [6, "+6 dB"],
+                  ] as const
+                ).map(([db, label]) => (
+                  <button
+                    key={label}
+                    type="button"
+                    onClick={() => updateAudio({ gainDb: db })}
+                    className={`tabular-tc rounded border py-0.5 text-[10px] font-semibold ${
+                      Math.abs(edl.tracks.audio.gainDb - db) < 0.3
+                        ? "border-[#F59E0B] bg-[#F59E0B]/15 text-[#F4F4F5]"
+                        : "border-[#22222A] bg-[#09090B] text-[#A1A1AA] hover:text-white"
+                    }`}
+                  >
+                    {label}
+                  </button>
+                ))}
+              </div>
 
               <StudioToggle
                 label="Vocal Clarity & 5.1 Isolation"
@@ -437,10 +613,104 @@ export function ContextInspector({
               />
             </div>
 
+            {/* Per-Clip V1 Audio Controls */}
+            {activeClip && (
+              <div className="space-y-2.5 border-t border-[#222228] pt-3">
+                <span className="block text-[11px] font-semibold uppercase tracking-wider text-[#71717A]">
+                  Selected Clip Volume ({activeClip.label || "Scene"})
+                </span>
+
+                <div className="space-y-2.5 rounded-md border border-[#222228] bg-[#09090B]/70 p-2.5">
+                  <ScrubSlider
+                    label="Clip Gain Trim"
+                    min={-60}
+                    max={12}
+                    step={0.5}
+                    value={activeClip.gainDb ?? 0}
+                    displayValue={formatDbLabel(activeClip.gainDb ?? 0)}
+                    onChange={(db) => updateClipProps(activeClip.id, { gainDb: db })}
+                  />
+                  <StudioToggle
+                    label="Mute Selected Clip"
+                    checked={Boolean(activeClip.muted)}
+                    onChange={(m) => updateClipProps(activeClip.id, { muted: m })}
+                  />
+                  <div className="grid grid-cols-2 gap-2">
+                    <ScrubNumber
+                      label="Fade In"
+                      unit="ms"
+                      min={0}
+                      max={4000}
+                      step={50}
+                      value={activeClip.fadeInMs ?? 0}
+                      onChange={(ms) => updateClipProps(activeClip.id, { fadeInMs: ms })}
+                    />
+                    <ScrubNumber
+                      label="Fade Out"
+                      unit="ms"
+                      min={0}
+                      max={4000}
+                      step={50}
+                      value={activeClip.fadeOutMs ?? 0}
+                      onChange={(ms) => updateClipProps(activeClip.id, { fadeOutMs: ms })}
+                    />
+                  </div>
+                </div>
+              </div>
+            )}
+
+            {/* Selected Detached / SFX Audio Clip (A1 / A3) */}
+            {activeAudioClip && (
+              <div className="space-y-2.5 border-t border-[#222228] pt-3">
+                <div className="flex items-center justify-between">
+                  <span className="text-[11px] font-semibold uppercase tracking-wider text-[#4ADE80]">
+                    Audio / SFX Clip ({(activeAudioClip.kind ?? "audio").toUpperCase()})
+                  </span>
+                  <button
+                    type="button"
+                    onClick={() => removeAudioClip(activeAudioClip.id)}
+                    className="text-[#A1A1AA] hover:text-[#EF4444]"
+                    title="Delete audio clip"
+                  >
+                    <Trash className="h-3.5 w-3.5" />
+                  </button>
+                </div>
+
+                {audioClips.length > 1 && (
+                  <StudioSelect
+                    ariaLabel="Selected Audio Clip"
+                    value={activeAudioClip.id}
+                    onChange={(aid) => selectAudioClip(aid)}
+                    options={audioClips.map((ac, i) => ({
+                      value: ac.id,
+                      label: ac.label || `${ac.kind ?? "audio"} ${i + 1}`,
+                    }))}
+                  />
+                )}
+
+                <div className="space-y-2.5 rounded-md border border-[#222228] bg-[#09090B]/70 p-2.5">
+                  <ScrubSlider
+                    label="Clip Gain"
+                    min={-60}
+                    max={12}
+                    step={0.5}
+                    value={activeAudioClip.gainDb ?? 0}
+                    displayValue={formatDbLabel(activeAudioClip.gainDb ?? 0)}
+                    onChange={(db) => updateAudioClip(activeAudioClip.id, { gainDb: db })}
+                  />
+                  <StudioToggle
+                    label="Mute Audio Clip"
+                    checked={Boolean(activeAudioClip.muted)}
+                    onChange={(m) => updateAudioClip(activeAudioClip.id, { muted: m })}
+                  />
+                </div>
+              </div>
+            )}
+
             <div className="space-y-3 border-t border-[#222228] pt-3.5">
               <div className="flex items-center justify-between">
                 <span className="text-[11px] font-semibold uppercase tracking-wider text-[#71717A]">
-                  Background Music (BGM)
+                  Background Music (BGM · Track A2)
                 </span>
                 <input
                   ref={bgmFileInputRef}
@@ -519,11 +789,11 @@ export function ContextInspector({
 
                   <ScrubSlider
                     label="BGM Bed Level"
-                    min={-30}
-                    max={-4}
+                    min={-60}
+                    max={6}
                     step={0.5}
                     value={bgm.gainDb}
-                    displayValue={`${bgm.gainDb.toFixed(1)} dB`}
+                    displayValue={formatDbLabel(bgm.gainDb)}
                     onChange={(db) => updateBgm({ gainDb: db })}
                   />
 
@@ -799,11 +1069,12 @@ export function ContextInspector({
             <div className="grid grid-cols-2 gap-1.5">
               {(
                 [
+                  ["seam_card_white", "Headline Hook", "Headline Hook"],
+                  ["hook_banner_dark", "Dark Banner", "WAIT FOR THIS..."],
                   ["pov_top_bar", "POV Top Bar", "POV: WHEN IT HAPPENS"],
-                  ["watermark_tag", "Watermark", "CUTFLOW"],
-                  ["cinema_credit", "Film Credit", "Cinema Title (2024)"],
-                  ["seam_card_white", "Seam Card", "Headline Hook"],
                   ["cta_pill", "CTA Pill", "Follow for Part 2"],
+                  ["watermark_tag", "Watermark", "CUTFLOW"],
+                  ["cinema_credit", "Film Credit", "Cinema Title (2026)"],
                 ] as const
               ).map(([kind, label, defaultTxt]) => (
                 <button
@@ -831,7 +1102,7 @@ export function ContextInspector({
                         : "border-[#222228] bg-[#09090B] text-[#A1A1AA]"
                     }`}
                   >
-                    {ov.kind.replace(/_/g, " ")}
+                    {ov.text.slice(0, 14) || ov.kind.replace(/_/g, " ")}
                   </button>
                 ))}
               </div>
@@ -843,14 +1114,24 @@ export function ContextInspector({
                   <span className="tabular-tc text-[10px] font-semibold uppercase text-[#F59E0B]">
                     {selectedOverlay.kind.replace(/_/g, " ")}
                   </span>
-                  <button
-                    type="button"
-                    onClick={() => removeOverlay(selectedOverlay.id)}
-                    className="text-[#A1A1AA] hover:text-[#EF4444]"
-                    title="Delete overlay"
-                  >
-                    <Trash className="h-3.5 w-3.5" />
-                  </button>
+                  <div className="flex items-center gap-2">
+                    <button
+                      type="button"
+                      onClick={() => duplicateOverlay(selectedOverlay.id)}
+                      className="text-[#A1A1AA] hover:text-[#F4F4F5]"
+                      title="Duplicate overlay"
+                    >
+                      <Copy className="h-3.5 w-3.5" />
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => removeOverlay(selectedOverlay.id)}
+                      className="text-[#A1A1AA] hover:text-[#EF4444]"
+                      title="Delete overlay"
+                    >
+                      <Trash className="h-3.5 w-3.5" />
+                    </button>
+                  </div>
                 </div>
 
                 <div>
@@ -864,6 +1145,18 @@ export function ContextInspector({
                     className="w-full rounded border border-[#222228] bg-[#111114] px-2 py-1 text-xs text-[#F4F4F5] focus:border-[#F59E0B] focus:outline-none"
                   />
                 </div>
+
+                <ScrubSlider
+                  label="Overlay Scale"
+                  min={50}
+                  max={220}
+                  step={5}
+                  value={Math.round((selectedOverlay.scale ?? 1) * 100)}
+                  displayValue={`${Math.round((selectedOverlay.scale ?? 1) * 100)}%`}
+                  onChange={(sc) =>
+                    updateOverlay(selectedOverlay.id, { scale: sc / 100 })
+                  }
+                />
 
                 {selectedOverlay.kind !== "pov_top_bar" && (
                   <>
@@ -943,7 +1236,7 @@ export function ContextInspector({
               </div>
             ) : (
               <p className="text-[11px] text-[#71717A]">
-                No graphic overlays on this timeline. Add a POV Bar, Watermark, or Credit above.
+                No graphic overlays on this timeline. Add a Hook, POV Bar, or Watermark above.
               </p>
             )}
           </>

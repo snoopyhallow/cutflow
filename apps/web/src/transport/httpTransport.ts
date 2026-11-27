@@ -5,6 +5,8 @@ import {
 } from "../edl";
 import type {
   BgmAssetItem,
+  BlankProjectCreateInput,
+  BlankProjectCreateResponse,
   ClipProjectSummary,
   ClipStatus,
   CoEditorRequest,
@@ -18,12 +20,14 @@ import type {
   IngestResult,
   JobProgressEvent,
   JobSummary,
+  LocalPathImportOptions,
   MashupCreateInput,
   MashupCreateResponse,
   PostCopyResponse,
   ProfileCreateInput,
   ProjectPeaks,
   SettingsResponse,
+  SfxAssetItem,
   SourceSummary,
   StorageSummary,
   StudioTransport,
@@ -32,15 +36,34 @@ import type {
   UrlProbeResponse,
 } from "./types";
 
+function getDesktopTokenHeader(): Record<string, string> {
+  if (typeof window === "undefined") return {};
+  const bridge = (window as { cutflowDesktop?: { desktopToken?: string } }).cutflowDesktop;
+  return bridge?.desktopToken
+    ? { "X-CutFlow-Desktop-Token": bridge.desktopToken }
+    : {};
+}
+
 async function requestJson<T>(url: string, init?: RequestInit): Promise<T> {
   const isFormData = init?.body instanceof FormData;
-  const res = await fetch(url, {
-    ...init,
-    headers: {
-      ...(isFormData ? {} : { "Content-Type": "application/json" }),
-      ...(init?.headers ?? {}),
-    },
-  });
+  let res: Response;
+  try {
+    res = await fetch(url, {
+      ...init,
+      headers: {
+        ...(isFormData ? {} : { "Content-Type": "application/json" }),
+        ...getDesktopTokenHeader(),
+        ...(init?.headers ?? {}),
+      },
+    });
+  } catch (err) {
+    if (err instanceof TypeError) {
+      throw new Error(
+        "Cannot connect to local CutFlow engine — make sure CutFlow Studio backend is running.",
+      );
+    }
+    throw err;
+  }
   if (!res.ok) {
     let detail = `${res.status} ${res.statusText}`;
     try {
@@ -131,6 +154,25 @@ export class HttpTransport implements StudioTransport {
     });
   }
 
+  importLocalPath(
+    localPath: string,
+    opts?: LocalPathImportOptions,
+  ): Promise<IngestResult> {
+    return requestJson<IngestResult>(`${this.baseUrl}/sources/local-path`, {
+      method: "POST",
+      body: JSON.stringify({
+        path: localPath,
+        profileId: opts?.profileId,
+        autoClip: opts?.autoClip ?? false,
+        title: opts?.title ?? "",
+      }),
+    });
+  }
+
+  sourceMediaUrl(sourceId: string): string {
+    return `${this.baseUrl}/sources/${encodeURIComponent(sourceId)}/media`;
+  }
+
   probeUrl(url: string): Promise<UrlProbeResponse> {
     return requestJson<UrlProbeResponse>(`${this.baseUrl}/sources/probe-url`, {
       method: "POST",
@@ -204,6 +246,57 @@ export class HttpTransport implements StudioTransport {
   listProjects(jobId?: string): Promise<ClipProjectSummary[]> {
     const qs = jobId ? `?job_id=${encodeURIComponent(jobId)}` : "";
     return requestJson<ClipProjectSummary[]>(`${this.baseUrl}/projects${qs}`);
+  }
+
+  async createBlankProject(
+    input?: BlankProjectCreateInput,
+  ): Promise<BlankProjectCreateResponse> {
+    const raw = await requestJson<BlankProjectCreateResponse>(
+      `${this.baseUrl}/projects/blank`,
+      {
+        method: "POST",
+        body: JSON.stringify(input ?? {}),
+      },
+    );
+    return {
+      ...raw,
+      edl: TimelineProjectSchema.parse(raw.edl),
+    };
+  }
+
+  renameProject(
+    projectId: string,
+    patch: { title?: string; status?: ClipStatus },
+  ): Promise<ClipProjectSummary> {
+    return requestJson<ClipProjectSummary>(
+      `${this.baseUrl}/projects/${encodeURIComponent(projectId)}`,
+      {
+        method: "PATCH",
+        body: JSON.stringify(patch),
+      },
+    );
+  }
+
+  duplicateProject(projectId: string): Promise<ClipProjectSummary> {
+    return requestJson<ClipProjectSummary>(
+      `${this.baseUrl}/projects/${encodeURIComponent(projectId)}/duplicate`,
+      { method: "POST" },
+    );
+  }
+
+  async deleteProject(projectId: string): Promise<void> {
+    await requestJson<void>(
+      `${this.baseUrl}/projects/${encodeURIComponent(projectId)}`,
+      { method: "DELETE" },
+    );
+  }
+
+  listSfx(): Promise<SfxAssetItem[]> {
+    return requestJson<SfxAssetItem[]>(`${this.baseUrl}/sfx`);
+  }
+
+  sfxMediaUrl(sfxId: string): string {
+    return `${this.baseUrl}/sfx/${encodeURIComponent(sfxId)}/media`;
   }
 
   async createMashup(input: MashupCreateInput): Promise<MashupCreateResponse> {
@@ -328,6 +421,30 @@ export class HttpTransport implements StudioTransport {
       edl: TimelineProjectSchema.parse(raw.edl),
       previousEdl: TimelineProjectSchema.parse(raw.previousEdl),
     };
+  }
+
+  async transcribeProject(
+    projectId: string,
+    language = "",
+  ): Promise<import("./types").TranscribeProjectResponse> {
+    const raw = await requestJson<import("./types").TranscribeProjectResponse>(
+      `${this.baseUrl}/projects/${encodeURIComponent(projectId)}/transcribe`,
+      {
+        method: "POST",
+        body: JSON.stringify({ language }),
+      },
+    );
+    return {
+      ...raw,
+      edl: TimelineProjectSchema.parse(raw.edl),
+      previousEdl: TimelineProjectSchema.parse(raw.previousEdl),
+    };
+  }
+
+  listAiModels(): Promise<import("./types").AiModelsResponse> {
+    return requestJson<import("./types").AiModelsResponse>(
+      `${this.baseUrl}/ai/models`,
+    );
   }
 
   updateProjectStatus(

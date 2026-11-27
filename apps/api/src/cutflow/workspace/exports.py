@@ -83,6 +83,16 @@ def export_clip_project(
             for sl in edl.tracks.video.clips
             if sl.source_id and sl.source_id not in source_media_map
         }
+        extra_src_ids.update(
+            br.source_id
+            for br in edl.tracks.video.broll
+            if br.source_id and br.source_id not in source_media_map
+        )
+        extra_src_ids.update(
+            ac.source_id
+            for ac in edl.tracks.audio.clips
+            if ac.source_id and ac.source_id not in source_media_map
+        )
         for sid in extra_src_ids:
             extra_src = session.get(SourceRow, sid)
             if extra_src is not None and not extra_src.archived and extra_src.path:

@@ -10,6 +10,28 @@ from fastapi.testclient import TestClient
 
 from cutflow import app as app_module
 from cutflow import db, paths
+from cutflow.security import secrets as secrets_module
+
+
+class _InMemoryKeyring:
+    def __init__(self) -> None:
+        self._store: dict[tuple[str, str], str] = {}
+
+    def get_password(self, service: str, key: str) -> str | None:
+        return self._store.get((service, key))
+
+    def set_password(self, service: str, key: str, value: str) -> None:
+        self._store[(service, key)] = value
+
+    def delete_password(self, service: str, key: str) -> None:
+        self._store.pop((service, key), None)
+
+
+@pytest.fixture(autouse=True)
+def _isolate_os_keyring(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Keep pytest completely isolated from the developer's real OS Keyring credentials."""
+    mem = _InMemoryKeyring()
+    monkeypatch.setattr(secrets_module, "_keyring", lambda: mem)
 
 
 @pytest.fixture

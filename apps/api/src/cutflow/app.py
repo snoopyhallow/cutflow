@@ -28,6 +28,11 @@ ENV_DISABLE_WATCHER = "CUTFLOW_DISABLE_WATCHER"
 
 
 def _web_dist_dir() -> Path | None:
+    env_override = os.environ.get("CUTFLOW_WEB_DIST", "").strip()
+    if env_override:
+        env_path = Path(env_override).resolve()
+        if (env_path / "index.html").exists():
+            return env_path
     candidate = Path(__file__).resolve().parents[3] / "web" / "dist"
     return candidate if (candidate / "index.html").exists() else None
 
@@ -44,6 +49,22 @@ async def _inbox_watcher_loop() -> None:
 
 @contextlib.asynccontextmanager
 async def lifespan(_app: FastAPI) -> AsyncIterator[None]:
+    loop = asyncio.get_running_loop()
+    orig_handler = loop.get_exception_handler()
+
+    def _quiet_windows_pipe_reset(
+        ev_loop: asyncio.AbstractEventLoop, context: dict[str, object]
+    ) -> None:
+        exc = context.get("exception")
+        if isinstance(exc, ConnectionResetError) and getattr(exc, "winerror", None) == 10054:
+            return
+        if orig_handler is not None:
+            orig_handler(ev_loop, context)
+        else:
+            ev_loop.default_exception_handler(context)
+
+    loop.set_exception_handler(_quiet_windows_pipe_reset)
+
     paths.ensure_layout()
     ensure_starter_audio_assets()
     db.init_db()

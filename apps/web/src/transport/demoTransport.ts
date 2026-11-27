@@ -11,7 +11,10 @@ import {
   type TimelineProject,
 } from "../edl";
 import type {
+  AiModelsResponse,
   BgmAssetItem,
+  BlankProjectCreateInput,
+  BlankProjectCreateResponse,
   ClipProjectSummary,
   ClipStatus,
   CoEditorRequest,
@@ -25,16 +28,19 @@ import type {
   IngestResult,
   JobProgressEvent,
   JobSummary,
+  LocalPathImportOptions,
   MashupCreateInput,
   MashupCreateResponse,
   PostCopyResponse,
   ProfileCreateInput,
   ProjectPeaks,
   SettingsResponse,
+  SfxAssetItem,
   SourceSummary,
   StorageSummary,
   StudioTransport,
   TimelineResponse,
+  TranscribeProjectResponse,
   UrlIngestOptions,
   UrlProbeResponse,
 } from "./types";
@@ -926,6 +932,63 @@ export class DemoTransport implements StudioTransport {
       ops.push({ op: "set_cold_open", enabled: false });
     }
 
+    if (
+      /\b(?:remove|delete|hide|clear|drop)\b.*\b(?:hook|headline|overlay|banner|card|title|watermark)\b/i.test(
+        text,
+      )
+    ) {
+      const selOvId = req.selection?.selectedOverlayId;
+      const beforeCount = next.tracks.overlays.length;
+      if (selOvId && next.tracks.overlays.some((o) => o.id === selOvId)) {
+        next.tracks.overlays = next.tracks.overlays.filter((o) => o.id !== selOvId);
+      } else if (lower.includes("hook") || lower.includes("headline")) {
+        const filtered = next.tracks.overlays.filter(
+          (o) =>
+            o.kind !== "seam_card_white" &&
+            o.kind !== "hook_banner_dark" &&
+            !o.text.toLowerCase().includes("hook"),
+        );
+        next.tracks.overlays =
+          filtered.length < beforeCount ? filtered : next.tracks.overlays.slice(1);
+      } else {
+        next.tracks.overlays = [];
+      }
+      if (next.tracks.overlays.length < beforeCount) {
+        applied.push(
+          `Removed ${beforeCount - next.tracks.overlays.length} overlay(s)`,
+        );
+        ops.push({ op: "delete_overlay" });
+      }
+      if (lower.includes("hook") && next.tracks.video.coldOpen?.enabled) {
+        next.tracks.video.coldOpen = null;
+        applied.push("Cold-open → off");
+      }
+    }
+
+    if (/\bmute\b.*\b(?:voice|audio|dialogue|original)\b/i.test(text)) {
+      next.tracks.audio.gainDb = -60;
+      next.tracks.audio.muteOriginal = true;
+      applied.push("Dialogue audio → muted (-∞ dB)");
+      ops.push({ op: "set_audio", gainDb: -60, muteOriginal: true });
+    }
+
+    const speedMatch = text.match(/\b(\d+(?:\.\d+)?)\s*x\b/i);
+    if (speedMatch && (lower.includes("speed") || lower.includes("faster") || lower.includes("slow"))) {
+      const spd = Math.max(0.25, Math.min(4, parseFloat(speedMatch[1])));
+      const targetId = req.selection?.selectedClipId ?? next.tracks.video.clips[0]?.id;
+      const clip = next.tracks.video.clips.find((c) => c.id === targetId);
+      if (clip) {
+        clip.speed = spd;
+        const newTotal = getTotalDurationMs(next);
+        if (next.tracks.video.framing.length > 0) {
+          next.tracks.video.framing[next.tracks.video.framing.length - 1].timelineEndMs =
+            newTotal;
+        }
+        applied.push(`Clip speed → ${spd}×`);
+        ops.push({ op: "set_clip_speed", clipId: clip.id, speed: spd });
+      }
+    }
+
     if (applied.length > 0) {
       this.projects.set(next.projectId, cloneEdl(next));
     }
@@ -938,8 +1001,9 @@ export class DemoTransport implements StudioTransport {
       reply:
         applied.length > 0
           ? "Applied your edit optimistically to the timeline."
-          : 'Try commands like "cut 4s to 7s", "neon glow captions", "1:1 square", or "insert \'WAIT\' at 5s".',
+          : 'Try commands like "Remove the hook", "Speed up 1.5x", "Mute voice", "cut 4s to 7s", or "1:1 square".',
       provider: "demo-rules",
+      modelUsed: req.model ? `demo:${req.model}` : "demo-rules",
       boundaries: req.boundaries ?? this.demoBoundaries,
       totalDurationMs: getTotalDurationMs(next),
     };
@@ -1076,5 +1140,220 @@ export class DemoTransport implements StudioTransport {
 
   async deleteSecret(key: string): Promise<void> {
     this.keysPresent[key] = false;
+  }
+
+  async importLocalPath(
+    localPath: string,
+    opts?: LocalPathImportOptions,
+  ): Promise<IngestResult> {
+    const cleanName = localPath.split(/[\\/]/).pop() ?? "local_media.mp4";
+    const title = opts?.title?.trim() || cleanName.replace(/\.[^.]+$/, "");
+    const src: SourceSummary = {
+      id: `src_local_${Date.now().toString(36)}`,
+      sourceType: "local",
+      url: null,
+      title,
+      channel: "Local Disk",
+      durationMs: 30_000,
+      width: 1920,
+      height: 1080,
+      fps: 60,
+      archived: false,
+      createdAt: new Date().toISOString(),
+    };
+    this.sources.unshift(src);
+    return { source: src, job: null };
+  }
+
+  sourceMediaUrl(_sourceId: string): string | null {
+    return null;
+  }
+
+  async listSfx(): Promise<SfxAssetItem[]> {
+    return [
+      { id: "whoosh_flash", name: "Whoosh Flash Transition", durationMs: 420, sizeBytes: 75_000 },
+      { id: "cinema_hit", name: "Cinema Sub Impact Hit", durationMs: 900, sizeBytes: 158_000 },
+    ];
+  }
+
+  sfxMediaUrl(_sfxId: string): string | null {
+    return null;
+  }
+
+  async createBlankProject(
+    input?: BlankProjectCreateInput,
+  ): Promise<BlankProjectCreateResponse> {
+    await this.listProjects();
+    const id = `clip_blank_${Date.now().toString(36)}`;
+    const title = input?.title?.trim() || "Untitled Project";
+    const ratio = input?.ratio ?? "9:16";
+    const srcId = input?.sourceId ?? this.sources[0]?.id ?? "src_demo_001";
+    const now = new Date().toISOString();
+    const edl: TimelineProject = TimelineProjectSchema.parse({
+      schemaVersion: 1,
+      projectId: id,
+      sourceId: srcId,
+      profileId: input?.profileId ?? this.profiles[0]?.id ?? null,
+      title,
+      status: "draft",
+      sourceDurationMs: 15_000,
+      sourceWidth: 1920,
+      sourceHeight: 1080,
+      output: {
+        ratio,
+        quality: "1080p",
+        speedPreset: "final",
+        fps: 60,
+        loudnessLufs: -14,
+        borderStyle: "none",
+        cinemaGrade: "off",
+      },
+      tracks: {
+        video: {
+          coldOpen: null,
+          clips: [
+            {
+              id: "s1",
+              sourceStartMs: 0,
+              sourceEndMs: 15_000,
+              sourceId: srcId,
+              label: title,
+            },
+          ],
+          framing: [
+            {
+              id: "f1",
+              timelineStartMs: 0,
+              timelineEndMs: 15_000,
+              mode: "fit",
+              splitRatio: 0.35,
+              camBox: null,
+              gameBox: null,
+              fitBackdrop: "black",
+            },
+          ],
+          broll: [],
+        },
+        audio: {
+          gainDb: 0,
+          normalizeLufs: -14,
+          dialogueEnhance: false,
+          muteOriginal: false,
+          bgm: null,
+          clips: [],
+        },
+        subtitles: {
+          enabled: true,
+          style: {
+            preset: "bold_pop",
+            revealMode: "progressive",
+            font: "Montserrat-ExtraBold",
+            fontSizeScale: 1,
+            primaryColor: "#FFFFFF",
+            accentColor: "#FFE500",
+            outlineColor: "#000000",
+          },
+          censorProfanity: false,
+          marginVRatio: 0.22,
+          muteRanges: [],
+          words: [],
+        },
+        overlays: [],
+      },
+    });
+    this.projects.set(id, cloneEdl(edl));
+    return {
+      id,
+      jobId: "job_demo_001",
+      sourceId: srcId,
+      title,
+      totalDurationMs: 15_000,
+      edl: cloneEdl(edl),
+      createdAt: now,
+      updatedAt: now,
+    };
+  }
+
+  async renameProject(
+    projectId: string,
+    patch: { title?: string; status?: ClipStatus },
+  ): Promise<ClipProjectSummary> {
+    const found = this.projects.get(projectId);
+    if (!found) throw new Error(`Project '${projectId}' not found.`);
+    if (patch.title !== undefined && patch.title.trim()) {
+      found.title = patch.title.trim();
+    }
+    if (patch.status) {
+      found.status = patch.status;
+    }
+    const list = await this.listProjects();
+    const item = list.find((p) => p.id === projectId);
+    if (!item) throw new Error(`Project '${projectId}' not found.`);
+    return item;
+  }
+
+  async duplicateProject(projectId: string): Promise<ClipProjectSummary> {
+    const found = this.projects.get(projectId);
+    if (!found) throw new Error(`Project '${projectId}' not found.`);
+    const newId = `${projectId}_copy_${Date.now().toString(36)}`;
+    const copy = cloneEdl(found);
+    copy.projectId = newId;
+    copy.title = `${found.title || "Project"} (Copy)`;
+    this.projects.set(newId, copy);
+    const list = await this.listProjects();
+    return list.find((p) => p.id === newId)!;
+  }
+
+  async deleteProject(projectId: string): Promise<void> {
+    this.projects.delete(projectId);
+  }
+
+  async transcribeProject(
+    projectId: string,
+    language = "en",
+  ): Promise<TranscribeProjectResponse> {
+    const found = this.projects.get(projectId);
+    if (!found) throw new Error(`Project '${projectId}' not found.`);
+    const before = cloneEdl(found);
+    const next = cloneEdl(found);
+    if (next.tracks.subtitles.words.length === 0) {
+      const sampleTokens = ["WAIT", "FOR", "THIS", "MOMENT", "RIGHT", "HERE!"];
+      const total = getTotalDurationMs(next);
+      const step = Math.max(250, Math.floor(Math.min(total, 3600) / sampleTokens.length));
+      next.tracks.subtitles.words = sampleTokens.map((t, idx) => ({
+        id: `dw_${idx + 1}`,
+        text: t,
+        startMs: idx * step + 80,
+        endMs: (idx + 1) * step,
+        speaker: "S1",
+      }));
+      next.tracks.subtitles.enabled = true;
+      this.projects.set(projectId, cloneEdl(next));
+    }
+    return {
+      edl: cloneEdl(next),
+      previousEdl: before,
+      wordCount: next.tracks.subtitles.words.length,
+      provider: "demo:whisper-small-int8",
+      language: language || "en",
+      totalDurationMs: getTotalDurationMs(next),
+    };
+  }
+
+  async listAiModels(): Promise<AiModelsResponse> {
+    return {
+      activeProvider: this.demoModels.active_provider,
+      scanModel: this.demoModels.scan_model,
+      editorModel: this.demoModels.editor_model,
+      keysPresent: { ...this.keysPresent },
+      ollamaOnline: false,
+      modelsByProvider: {
+        gemini: ["gemini-3.5-flash-lite", "gemini-flash-lite-latest", "gemini-3.1-flash-lite"],
+        openai: ["gpt-4o-mini", "gpt-4.1-mini"],
+        anthropic: ["claude-sonnet-4-5"],
+        groq: ["llama-3.3-70b-versatile"],
+        ollama: ["qwen2.5:7b"],
+      },
+    };
   }
 }

@@ -8,11 +8,13 @@ __pycache__/
 dist/
 build/
 
-# Node / Frontend
+# Node / Frontend / Desktop
 node_modules/
 apps/web/dist/
 apps/web/dist-demo/
 apps/web/.vite/
+apps/desktop/release/
+apps/desktop/dist/
 playwright-report/
 test-results/
 

@@ -1,4 +1,4 @@
-"""Zero-buffer FFmpeg EDL v1 compiler: reframe, transitions, grade, ASS glow, BGM auto-ducking."""
+"""Zero-buffer FFmpeg EDL v1 compiler: multi-track, speed/freeze, reframe, ASS glow, & mixer."""
 
 from __future__ import annotations
 
@@ -11,7 +11,7 @@ from pathlib import Path
 from ..audio.bgm import resolve_bgm_asset_path, resolve_sfx_path
 from ..audio.media import MediaError, probe_media
 from ..edl.ops import TimelineMapper
-from ..edl.schema import FramingSegment, TimelineProject
+from ..edl.schema import FramingSegment, NormalizedBox, TimelineProject
 from .overlays import RenderedOverlay, render_border_frame_png, render_overlay_png
 from .subtitles import write_ass_file
 
@@ -50,10 +50,19 @@ class RenderError(RuntimeError):
 @dataclass(slots=True)
 class _SegmentSpec:
     source_start_ms: int
+    raw_source_duration_ms: int
     duration_ms: int
     is_cold_open: bool
-    audio_fade_out_ms: int
-    source_id: str | None
+    is_gap: bool = False
+    speed: float = 1.0
+    reverse: bool = False
+    freeze_duration_ms: int = 0
+    gain_db: float = 0.0
+    muted: bool = False
+    audio_detached: bool = False
+    audio_fade_in_ms: int = 0
+    audio_fade_out_ms: int = 0
+    source_id: str | None = None
     transition_in: str = "none"
     transition_duration_ms: int = 220
     transition_sfx: str = "none"
@@ -82,6 +91,23 @@ def escape_ffmpeg_filter_path(path: Path) -> str:
     """Escape a filesystem path cleanly for libass ``ass=filename='...'`` on Windows & POSIX."""
     posix = path.resolve().as_posix()
     return posix.replace("\\", "/").replace(":", r"\:").replace("'", r"\'")
+
+
+def _build_atempo_filters(speed: float) -> list[str]:
+    """Chain FFmpeg ``atempo`` stages (each bounded in [0.5, 2.0]) for ``0.25x..4.0x``."""
+    rem = max(0.25, min(4.0, float(speed)))
+    if abs(rem - 1.0) < 0.005:
+        return []
+    stages: list[str] = []
+    while rem > 2.0 + 1e-6:
+        stages.append("atempo=2.0")
+        rem /= 2.0
+    while rem < 0.5 - 1e-6:
+        stages.append("atempo=0.5")
+        rem /= 0.5
+    if abs(rem - 1.0) >= 0.005:
+        stages.append(f"atempo={rem:.4f}")
+    return stages
 
 
 @functools.lru_cache(maxsize=1)
@@ -114,15 +140,12 @@ def nvenc_is_usable() -> bool:
     return proc.returncode == 0
 
 
-def _encoder_args(
-    *, speed_preset: str, quality: str, prefer_nvenc: bool
-) -> tuple[str, list[str]]:
+def _encoder_args(*, speed_preset: str, quality: str, prefer_nvenc: bool) -> tuple[str, list[str]]:
     if prefer_nvenc and nvenc_is_usable():
         if speed_preset == "draft":
             return "h264_nvenc", ["-c:v", "h264_nvenc", "-preset", "p3", "-cq", "24"]
         return "h264_nvenc", ["-c:v", "h264_nvenc", "-preset", "p5", "-cq", "19"]
 
-    # Bounded lookahead CPU libx264 (safe on 16 GB RAM machines even at 1080p/1440p/4K)
     if speed_preset == "draft":
         return (
             "libx264",
@@ -185,7 +208,6 @@ def _build_framing_segment_filters(
     parts: list[str] = []
     cur_in = in_label
 
-    # Strip baked letterbox/pillarbox bars first when detected by cropdetect
     if framing.source_crop_box is not None:
         sc = framing.source_crop_box.clamped()
         if sc.w < 0.998 or sc.h < 0.998 or sc.x > 0.001 or sc.y > 0.001:
@@ -272,53 +294,117 @@ def compile_edl_to_ffmpeg(
     output_path.parent.mkdir(parents=True, exist_ok=True)
 
     out_w, out_h = resolve_output_dimensions(edl.output.ratio, edl.output.quality)
+    base_src_w = max(2, (int(edl.source_width or 1920) // 2) * 2)
+    base_src_h = max(2, (int(edl.source_height or 1080) // 2) * 2)
     fps = edl.output.fps
     mapper = TimelineMapper(edl)
     total_dur_ms = mapper.total_duration_ms
     total_dur_s = max(0.2, total_dur_ms / 1000.0)
 
-    # 1. Build ordered seeked video segments: optional Cold-Open + all blade-cut / mashup clips
+    # 1. Build ordered timeline segments: Cold-Open + optional free-position gaps + V1 clips
     segments: list[_SegmentSpec] = []
     co = edl.tracks.video.cold_open
+    cursor_ms = 0
     if co is not None and co.enabled:
         segments.append(
             _SegmentSpec(
                 source_start_ms=co.source_start_ms,
+                raw_source_duration_ms=co.duration_ms,
                 duration_ms=co.duration_ms,
                 is_cold_open=True,
                 audio_fade_out_ms=co.fade_out_ms,
                 source_id=edl.source_id,
             )
         )
-    for idx_c, clip in enumerate(edl.tracks.video.clips):
+        cursor_ms = co.duration_ms
+
+    for idx_c, (s_t0, _s_t1, clip) in enumerate(mapper.spans):
+        if s_t0 - cursor_ms >= 50:
+            gap_ms = s_t0 - cursor_ms
+            segments.append(
+                _SegmentSpec(
+                    source_start_ms=0,
+                    raw_source_duration_ms=gap_ms,
+                    duration_ms=gap_ms,
+                    is_cold_open=False,
+                    is_gap=True,
+                    muted=True,
+                )
+            )
+            cursor_ms = s_t0
+
         is_first_overall = idx_c == 0 and len(segments) == 0
         segments.append(
             _SegmentSpec(
                 source_start_ms=clip.source_start_ms,
+                raw_source_duration_ms=clip.raw_source_duration_ms,
                 duration_ms=clip.duration_ms,
                 is_cold_open=False,
-                audio_fade_out_ms=0,
+                speed=clip.speed,
+                reverse=clip.reverse,
+                freeze_duration_ms=clip.freeze_duration_ms,
+                gain_db=clip.gain_db,
+                muted=clip.muted,
+                audio_detached=clip.audio_detached,
+                audio_fade_in_ms=clip.fade_in_ms,
+                audio_fade_out_ms=clip.fade_out_ms,
                 source_id=clip.source_id or edl.source_id,
                 transition_in="none" if is_first_overall else clip.transition_in,
                 transition_duration_ms=clip.transition_duration_ms,
                 transition_sfx="none" if is_first_overall else clip.transition_sfx,
             )
         )
+        cursor_ms = s_t0 + clip.duration_ms
 
     argv: list[str] = [ffmpeg, "-hide_banner", "-loglevel", "error", "-y"]
     filter_parts: list[str] = []
+    next_input_idx = 0
+    needs_norm_scale = any(seg.is_gap for seg in segments) or bool(
+        source_media_map and len(source_media_map) > 1
+    )
 
     for idx, seg in enumerate(segments):
+        dur_s = max(0.06, seg.duration_ms / 1000.0)
+        if seg.is_gap:
+            filter_parts.append(
+                f"color=c=black:s={base_src_w}x{base_src_h}:r={fps}:d={dur_s:.3f},"
+                f"format=yuv420p,setsar=1[vseg{idx}]"
+            )
+            filter_parts.append(
+                f"anullsrc=channel_layout=stereo:sample_rate=48000,atrim=0:{dur_s:.3f}[aseg{idx}]"
+            )
+            continue
+
         seg_media, seg_origin_ms = (
             source_media_map.get(seg.source_id, (media_path, input_origin_ms))
             if (source_media_map and seg.source_id)
             else (media_path, input_origin_ms)
         )
         rel_start_s = max(0.0, (seg.source_start_ms - seg_origin_ms) / 1000.0)
-        dur_s = max(0.1, seg.duration_ms / 1000.0)
-        argv.extend(["-ss", f"{rel_start_s:.3f}", "-t", f"{dur_s:.3f}", "-i", str(seg_media)])
+        read_dur_s = (
+            0.12 if seg.freeze_duration_ms > 0 else max(0.1, seg.raw_source_duration_ms / 1000.0)
+        )
+        in_idx = next_input_idx
+        next_input_idx += 1
+        argv.extend(["-ss", f"{rel_start_s:.3f}", "-t", f"{read_dur_s:.3f}", "-i", str(seg_media)])
 
-        v_chain = f"[{idx}:v]setpts=PTS-STARTPTS,fps={fps},setsar=1"
+        if seg.freeze_duration_ms > 0:
+            v_chain = (
+                f"[{in_idx}:v]trim=duration=0.04,setpts=PTS-STARTPTS,"
+                f"tpad=stop_mode=clone:stop_duration={dur_s:.3f},"
+                f"trim=0:{dur_s:.3f},setpts=PTS-STARTPTS,fps={fps},setsar=1"
+            )
+        else:
+            v_chain = f"[{in_idx}:v]setpts=PTS-STARTPTS"
+            if seg.reverse:
+                v_chain += ",reverse,setpts=PTS-STARTPTS"
+            if abs(seg.speed - 1.0) >= 0.005:
+                v_chain += f",setpts=PTS/{seg.speed:.4f}"
+            v_chain += f",fps={fps},setsar=1"
+
+        if needs_norm_scale:
+            v_chain += f",scale={base_src_w}:{base_src_h},format=yuv420p,setsar=1"
+
         # Incoming transition fade-in on head of this slice (preserves exact timeline duration!)
         if idx > 0 and seg.transition_in in ("flash_white", "dip_black", "dissolve"):
             in_col = "white" if seg.transition_in == "flash_white" else "black"
@@ -338,18 +424,33 @@ def compile_edl_to_ffmpeg(
 
         filter_parts.append(f"{v_chain}[vseg{idx}]")
 
-        if has_audio:
-            a_chain = (
-                f"[{idx}:a]asetpts=PTS-STARTPTS,aresample=48000,aformat=channel_layouts=stereo"
-            )
-            if (
-                seg.is_cold_open
-                and seg.audio_fade_out_ms > 0
-                and seg.duration_ms > seg.audio_fade_out_ms
-            ):
+        silent_seg = (
+            not has_audio
+            or seg.freeze_duration_ms > 0
+            or seg.muted
+            or seg.audio_detached
+            or seg.gain_db <= -59.5
+        )
+        if not silent_seg:
+            a_steps = [
+                f"[{in_idx}:a]asetpts=PTS-STARTPTS",
+                "aresample=48000",
+                "aformat=channel_layouts=stereo",
+            ]
+            if seg.reverse:
+                a_steps.extend(["areverse", "asetpts=PTS-STARTPTS"])
+            a_steps.extend(_build_atempo_filters(seg.speed))
+            if abs(seg.gain_db) > 0.05:
+                a_steps.append(f"volume={seg.gain_db:.1f}dB")
+            if seg.audio_fade_in_ms > 0 and seg.duration_ms > seg.audio_fade_in_ms:
+                a_steps.append(f"afade=t=in:st=0:d={seg.audio_fade_in_ms / 1000.0:.3f}")
+            if seg.audio_fade_out_ms > 0 and seg.duration_ms > seg.audio_fade_out_ms:
                 fade_st = (seg.duration_ms - seg.audio_fade_out_ms) / 1000.0
-                a_chain += f",afade=t=out:st={fade_st:.3f}:d={seg.audio_fade_out_ms / 1000.0:.3f}"
-            filter_parts.append(f"{a_chain}[aseg{idx}]")
+                a_steps.append(
+                    f"afade=t=out:st={fade_st:.3f}:d={seg.audio_fade_out_ms / 1000.0:.3f}"
+                )
+            a_steps.extend([f"apad=whole_dur={dur_s:.3f}", f"atrim=0:{dur_s:.3f}"])
+            filter_parts.append(f"{','.join(a_steps)}[aseg{idx}]")
         else:
             filter_parts.append(
                 f"anullsrc=channel_layout=stereo:sample_rate=48000,atrim=0:{dur_s:.3f}[aseg{idx}]"
@@ -398,6 +499,67 @@ def compile_edl_to_ffmpeg(
         filter_parts.append(f"{''.join(framed_outs)}concat=n={k}:v=1:a=0[vframed]")
         cur_v = "vframed"
 
+    # 2b. Optional V2 B-Roll / Picture-in-Picture overlays
+    extra_audio_stems: list[str] = []
+    detached_voice_stems: list[str] = []
+
+    for br_idx, br in enumerate(edl.tracks.video.broll):
+        br_media, br_origin = (
+            source_media_map.get(br.source_id, (media_path, input_origin_ms))
+            if source_media_map
+            else (media_path, input_origin_ms)
+        )
+        if not br_media.is_file():
+            continue
+        box = (br.box or NormalizedBox(x=0.56, y=0.06, w=0.38, h=0.28)).clamped()
+        bw = max(2, (int(round(out_w * box.w)) // 2) * 2)
+        bh = max(2, (int(round(out_h * box.h)) // 2) * 2)
+        bx = int(round(out_w * box.x))
+        by = int(round(out_h * box.y))
+        rel_s = max(0.0, (br.source_start_ms - br_origin) / 1000.0)
+        raw_s = max(0.1, (br.source_end_ms - br.source_start_ms) / 1000.0)
+        t_start_s = max(0.0, br.timeline_start_ms / 1000.0)
+        br_dur_s = max(0.06, br.duration_ms / 1000.0)
+        t_end_s = t_start_s + br_dur_s
+
+        br_in = next_input_idx
+        next_input_idx += 1
+        argv.extend(["-ss", f"{rel_s:.3f}", "-t", f"{raw_s:.3f}", "-i", str(br_media)])
+
+        br_lbl = f"vbr{br_idx}"
+        out_br_lbl = f"vbr_comp{br_idx}"
+        alpha_step = (
+            f",format=rgba,colorchannelmixer=aa={br.opacity:.3f}"
+            if br.opacity < 0.995
+            else ",format=yuv420p"
+        )
+        filter_parts.append(
+            f"[{br_in}:v]setpts=(PTS-STARTPTS)/{br.speed:.4f}+{t_start_s:.3f}/TB,"
+            f"fps={fps},scale={bw}:{bh}:force_original_aspect_ratio=increase,"
+            f"crop={bw}:{bh}{alpha_step}[{br_lbl}]"
+        )
+        filter_parts.append(
+            f"[{cur_v}][{br_lbl}]overlay=x={bx}:y={by}:eof_action=pass:"
+            f"enable='between(t,{t_start_s:.3f},{t_end_s:.3f})'[{out_br_lbl}]"
+        )
+        cur_v = out_br_lbl
+
+        if not br.muted and br.gain_db > -59.5 and has_audio:
+            delay_ms = max(0, int(br.timeline_start_ms))
+            br_a_lbl = f"abr{br_idx}"
+            a_steps = [
+                f"[{br_in}:a]asetpts=PTS-STARTPTS",
+                "aresample=48000",
+                "aformat=channel_layouts=stereo",
+                *_build_atempo_filters(br.speed),
+                f"volume={br.gain_db:.1f}dB",
+                f"adelay={delay_ms}|{delay_ms}",
+                f"apad=whole_dur={total_dur_s:.3f}",
+                f"atrim=0:{total_dur_s:.3f}",
+            ]
+            filter_parts.append(f"{','.join(a_steps)}[{br_a_lbl}]")
+            extra_audio_stems.append(br_a_lbl)
+
     # 3. Optional Crisp HD Cinema Color Grade + Micro-Contrast Sharpen
     if edl.output.cinema_grade == "crisp_hd":
         filter_parts.append(
@@ -405,8 +567,6 @@ def compile_edl_to_ffmpeg(
             f"unsharp=5:5:0.65:5:5:0.0[vgrade]"
         )
         cur_v = "vgrade"
-
-    next_input_idx = n_segs
 
     # 4. Optional 2x Supersampled Inner Rounded Cinema Border Frame
     border_path: Path | None = None
@@ -459,10 +619,78 @@ def compile_edl_to_ffmpeg(
         filter_parts.append(f"[{cur_v}]ass=filename='{escaped}'[vsub]")
         cur_v = "vsub"
 
-    # 7. Studio Audio Mixer: Dialogue EQ + Transition SFX + Looped BGM + Auto-Ducking + Loudnorm
+    # 7. Studio Audio Mixer: Dialogue + Detached A1 + A3 Multi-SFX + Looped BGM + Loudnorm
     audio_cfg = edl.tracks.audio
+
+    # 7a. Render explicit A1 (detached) & A3 (SFX / audio) clips
+    for ac_idx, ac in enumerate(audio_cfg.clips):
+        if ac.muted or ac.gain_db <= -59.5:
+            continue
+        ac_path: Path | None = None
+        ac_origin = 0
+        if ac.asset_id:
+            ac_path = resolve_sfx_path(ac.asset_id)
+            if ac_path is None:
+                resolved_b = resolve_bgm_asset_path(ac.asset_id)
+                if resolved_b is not None:
+                    ac_path = resolved_b[0]
+        elif ac.source_id:
+            ac_media, ac_origin = (
+                source_media_map.get(ac.source_id, (media_path, input_origin_ms))
+                if source_media_map
+                else (media_path, input_origin_ms)
+            )
+            if ac_media.is_file():
+                ac_path = ac_media
+        if ac_path is None or not ac_path.is_file():
+            continue
+
+        rel_s = max(0.0, (ac.source_start_ms - ac_origin) / 1000.0)
+        raw_s = max(0.06, (ac.source_end_ms - ac.source_start_ms) / 1000.0)
+        ac_dur_s = max(0.06, ac.duration_ms / 1000.0)
+        delay_ms = max(0, int(ac.timeline_start_ms))
+
+        ac_in = next_input_idx
+        next_input_idx += 1
+        argv.extend(["-ss", f"{rel_s:.3f}", "-t", f"{raw_s:.3f}", "-i", str(ac_path)])
+        ac_lbl = f"aaclip{ac_idx}"
+        a_steps = [
+            f"[{ac_in}:a]asetpts=PTS-STARTPTS",
+            "aresample=48000",
+            "aformat=channel_layouts=stereo",
+            *_build_atempo_filters(ac.speed),
+        ]
+        if abs(ac.gain_db) > 0.05:
+            a_steps.append(f"volume={ac.gain_db:.1f}dB")
+        if ac.fade_in_ms > 0 and ac.duration_ms > ac.fade_in_ms:
+            a_steps.append(f"afade=t=in:st=0:d={ac.fade_in_ms / 1000.0:.3f}")
+        if ac.fade_out_ms > 0 and ac.duration_ms > ac.fade_out_ms:
+            fo_st = max(0.0, ac_dur_s - ac.fade_out_ms / 1000.0)
+            a_steps.append(f"afade=t=out:st={fo_st:.3f}:d={ac.fade_out_ms / 1000.0:.3f}")
+        a_steps.extend(
+            [
+                f"adelay={delay_ms}|{delay_ms}",
+                f"apad=whole_dur={total_dur_s:.3f}",
+                f"atrim=0:{total_dur_s:.3f}",
+            ]
+        )
+        filter_parts.append(f"{','.join(a_steps)}[{ac_lbl}]")
+        if ac.kind == "detached":
+            detached_voice_stems.append(ac_lbl)
+        else:
+            extra_audio_stems.append(ac_lbl)
+
+    if detached_voice_stems:
+        dv_inputs = "".join(f"[{s}]" for s in [cur_a, *detached_voice_stems])
+        n_dv = 1 + len(detached_voice_stems)
+        filter_parts.append(
+            f"{dv_inputs}amix=inputs={n_dv}:duration=first:dropout_transition=0:normalize=0[avoice_pre]"
+        )
+        cur_a = "avoice_pre"
+
+    voice_muted = audio_cfg.mute_original or audio_cfg.gain_db <= -59.5
     voice_chain: list[str] = []
-    if audio_cfg.mute_original:
+    if voice_muted:
         voice_chain.append("volume=0")
     else:
         if audio_cfg.dialogue_enhance:
@@ -475,7 +703,7 @@ def compile_edl_to_ffmpeg(
         cur_a = "avoice"
 
     # Optional Transition SFX hits delayed to exact cut timestamps
-    sfx_labels: list[str] = []
+    sfx_labels: list[str] = [*extra_audio_stems]
     cut_cursor_ms = 0
     for idx, seg in enumerate(segments):
         if idx > 0 and seg.transition_sfx != "none":
@@ -497,7 +725,7 @@ def compile_edl_to_ffmpeg(
     # Optional Looped BGM Bed + Sidechain Auto-Ducking under active dialogue
     bgm_path: Path | None = None
     bgm_label: str | None = None
-    if audio_cfg.bgm is not None:
+    if audio_cfg.bgm is not None and audio_cfg.bgm.gain_db > -59.5:
         bgm_cfg = audio_cfg.bgm
         resolved_bgm = resolve_bgm_asset_path(bgm_cfg.asset_id)
         if resolved_bgm is not None:
@@ -532,7 +760,7 @@ def compile_edl_to_ffmpeg(
             filter_parts.append(f"[{next_input_idx}:a]{','.join(bgm_filters)}[abgm_pre]")
             next_input_idx += 1
 
-            if bgm_cfg.ducking_enabled and has_audio and not audio_cfg.mute_original:
+            if bgm_cfg.ducking_enabled and (has_audio or detached_voice_stems) and not voice_muted:
                 filter_parts.append(f"[{cur_a}]asplit=2[avoice_main][avoice_sc]")
                 filter_parts.append(
                     "[abgm_pre][avoice_sc]sidechaincompress="
@@ -552,8 +780,12 @@ def compile_edl_to_ffmpeg(
         )
         cur_a = "amixed"
 
-    lufs = audio_cfg.normalize_lufs or edl.output.loudness_lufs
-    filter_parts.append(f"[{cur_a}]loudnorm=I={lufs:.1f}:TP=-1.5:LRA=11[aout]")
+    if voice_muted and bgm_label is None and not sfx_labels:
+        # Preserve true silence when everything is muted instead of loudnorm boosting noise floor
+        filter_parts.append(f"[{cur_a}]volume=0[aout]")
+    else:
+        lufs = audio_cfg.normalize_lufs or edl.output.loudness_lufs
+        filter_parts.append(f"[{cur_a}]loudnorm=I={lufs:.1f}:TP=-1.5:LRA=11[aout]")
     cur_a = "aout"
 
     encoder, enc_args = _encoder_args(

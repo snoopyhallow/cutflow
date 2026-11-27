@@ -39,6 +39,15 @@ export const VideoSliceSchema = z
     sourceEndMs: z.number().int().min(1),
     sourceId: z.string().nullable().optional(),
     label: z.string().optional(),
+    timelineStartMs: z.number().int().min(0).nullable().optional(),
+    speed: z.number().min(0.25).max(4.0).optional(),
+    reverse: z.boolean().optional(),
+    freezeDurationMs: z.number().int().min(0).max(30000).optional(),
+    gainDb: z.number().min(-60).max(12).optional(),
+    muted: z.boolean().optional(),
+    audioDetached: z.boolean().optional(),
+    fadeInMs: z.number().int().min(0).max(5000).optional(),
+    fadeOutMs: z.number().int().min(0).max(5000).optional(),
     transitionIn: z.enum(["none", "flash_white", "dip_black", "dissolve"]).optional(),
     transitionDurationMs: z.number().int().min(80).max(800).optional(),
     transitionSfx: z.enum(["none", "whoosh_flash", "cinema_hit"]).optional(),
@@ -46,6 +55,25 @@ export const VideoSliceSchema = z
   .strict()
   .refine((v) => v.sourceEndMs > v.sourceStartMs, {
     message: "sourceEndMs must be greater than sourceStartMs",
+  });
+
+export const BRollClipSchema = z
+  .object({
+    id: z.string().min(1),
+    sourceId: z.string().min(1),
+    label: z.string().optional(),
+    sourceStartMs: z.number().int().min(0),
+    sourceEndMs: z.number().int().min(1),
+    timelineStartMs: z.number().int().min(0),
+    speed: z.number().min(0.25).max(4.0).optional(),
+    opacity: z.number().min(0.1).max(1.0).optional(),
+    box: NormalizedBoxSchema.nullable().optional(),
+    gainDb: z.number().min(-60).max(12).optional(),
+    muted: z.boolean().optional(),
+  })
+  .strict()
+  .refine((b) => b.sourceEndMs > b.sourceStartMs, {
+    message: "broll sourceEndMs must be greater than sourceStartMs",
   });
 
 export const FramingSegmentSchema = z
@@ -73,13 +101,14 @@ export const VideoTrackSchema = z
     coldOpen: ColdOpenBlockSchema.nullable().default(null),
     clips: z.array(VideoSliceSchema).min(1),
     framing: z.array(FramingSegmentSchema).min(1),
+    broll: z.array(BRollClipSchema).optional(),
   })
   .strict();
 
 export const BgmConfigSchema = z
   .object({
     assetId: z.string().optional(),
-    gainDb: z.number().min(-48).max(12).default(-16),
+    gainDb: z.number().min(-60).max(12).default(-16),
     duckingEnabled: z.boolean().default(true),
     startOffsetMs: z.number().int().min(0).optional(),
     fadeInMs: z.number().int().min(0).max(5000).optional(),
@@ -87,13 +116,35 @@ export const BgmConfigSchema = z
   })
   .strict();
 
+export const AudioClipItemSchema = z
+  .object({
+    id: z.string().min(1),
+    kind: z.enum(["detached", "sfx", "audio"]).optional(),
+    assetId: z.string().nullable().optional(),
+    sourceId: z.string().nullable().optional(),
+    label: z.string().optional(),
+    sourceStartMs: z.number().int().min(0),
+    sourceEndMs: z.number().int().min(1),
+    timelineStartMs: z.number().int().min(0),
+    speed: z.number().min(0.25).max(4.0).optional(),
+    gainDb: z.number().min(-60).max(12).optional(),
+    muted: z.boolean().optional(),
+    fadeInMs: z.number().int().min(0).max(5000).optional(),
+    fadeOutMs: z.number().int().min(0).max(5000).optional(),
+  })
+  .strict()
+  .refine((a) => a.sourceEndMs > a.sourceStartMs, {
+    message: "audio clip sourceEndMs must be greater than sourceStartMs",
+  });
+
 export const AudioTrackSchema = z
   .object({
-    gainDb: z.number().min(-24).max(24).default(0),
+    gainDb: z.number().min(-60).max(24).default(0),
     normalizeLufs: z.number().min(-36).max(-5).default(-14),
     dialogueEnhance: z.boolean().optional(),
     muteOriginal: z.boolean().optional(),
     bgm: BgmConfigSchema.nullable().default(null),
+    clips: z.array(AudioClipItemSchema).optional(),
   })
   .strict();
 
@@ -167,6 +218,7 @@ export const OverlayItemSchema = z
     yOffsetRatio: z.number().min(-0.5).max(0.5).default(0),
     xOffsetRatio: z.number().min(-0.5).max(0.5).optional(),
     opacity: z.number().min(0.1).max(1.0).optional(),
+    scale: z.number().min(0.4).max(2.5).optional(),
     maxLines: z.number().int().min(1).max(4).default(2),
   })
   .strict()
@@ -205,9 +257,11 @@ export type NormalizedBox = z.infer<typeof NormalizedBoxSchema>;
 export type OutputSettings = z.infer<typeof OutputSettingsSchema>;
 export type ColdOpenBlock = z.infer<typeof ColdOpenBlockSchema>;
 export type VideoSlice = z.infer<typeof VideoSliceSchema>;
+export type BRollClip = z.infer<typeof BRollClipSchema>;
 export type FramingSegment = z.infer<typeof FramingSegmentSchema>;
 export type BgmConfig = z.infer<typeof BgmConfigSchema>;
 export type BgmTrack = BgmConfig;
+export type AudioClipItem = z.infer<typeof AudioClipItemSchema>;
 export type AudioTrack = z.infer<typeof AudioTrackSchema>;
 export type SubtitleStyle = z.infer<typeof SubtitleStyleSchema>;
 export type SubtitleWord = z.infer<typeof SubtitleWordSchema>;

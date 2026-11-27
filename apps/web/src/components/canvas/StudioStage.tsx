@@ -1,29 +1,45 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import {
   Camera,
+  Copy,
+  CornersOut,
+  MagicWand,
   MusicNotes,
   Pause,
+  PencilSimple,
   Play,
+  Scissors,
   SkipBack,
+  Snowflake,
   SpeakerHigh,
   SpeakerSlash,
+  Trash,
 } from "@phosphor-icons/react";
 import {
+  buildClipSpans,
   formatTimecodeMs,
   getActiveFramingAt,
+  getAudioClipDurationMs,
+  getBRollDurationMs,
   getColdOpenDurationMs,
   getTotalDurationMs,
-  timelineToSource,
+  resolveTimelinePoint,
   type FramingSegment,
   type NormalizedBox,
+  type OverlayItem,
 } from "../../edl";
 import { useTimelineStore } from "../../state/timelineStore";
-import type { ProjectPeaks } from "../../transport";
+import type { ProjectPeaks, StudioTransport } from "../../transport";
+import {
+  StudioContextMenu,
+  type StudioContextMenuState,
+} from "../ui/StudioContextMenu";
 
 interface StudioStageProps {
   mediaUrl: string | null;
   bgmUrl: string | null;
   peaks: ProjectPeaks | null;
+  transport?: StudioTransport;
 }
 
 const DEFAULT_NEON_PALETTE = [
@@ -33,6 +49,67 @@ const DEFAULT_NEON_PALETTE = [
   "#F472B6",
   "#F87171",
 ];
+
+import { dbToLinearGain, formatDbLabel } from "../../utils/audioMath";
+
+export { dbToLinearGain, formatDbLabel };
+
+const mediaGainNodeMap = new WeakMap<
+  HTMLMediaElement,
+  { ctx: AudioContext; gain: GainNode }
+>();
+let sharedAudioContext: AudioContext | null = null;
+
+function ensureElementGainNode(
+  el: HTMLMediaElement | null,
+): { ctx: AudioContext; gain: GainNode } | null {
+  if (!el || typeof window === "undefined") return null;
+  const existing = mediaGainNodeMap.get(el);
+  if (existing) return existing;
+
+  const AudioCtx =
+    window.AudioContext ||
+    (window as unknown as { webkitAudioContext?: typeof AudioContext })
+      .webkitAudioContext;
+  if (!AudioCtx) return null;
+
+  try {
+    if (!sharedAudioContext) {
+      sharedAudioContext = new AudioCtx();
+    }
+    const source = sharedAudioContext.createMediaElementSource(el);
+    const gain = sharedAudioContext.createGain();
+    source.connect(gain);
+    gain.connect(sharedAudioContext.destination);
+    const entry = { ctx: sharedAudioContext, gain };
+    mediaGainNodeMap.set(el, entry);
+    return entry;
+  } catch {
+    return null;
+  }
+}
+
+function applyLiveElementGain(el: HTMLMediaElement, linearGain: number): void {
+  const safeLinear = Math.max(0, Math.min(4.5, linearGain));
+  const node = ensureElementGainNode(el);
+  if (node && node.ctx.state === "running") {
+    el.muted = safeLinear <= 0.0001;
+    el.volume = 1.0;
+    node.gain.gain.value = safeLinear;
+  } else {
+    el.muted = safeLinear <= 0.0001;
+    el.volume = Math.max(0, Math.min(1, safeLinear));
+    if (node) {
+      node.gain.gain.value = safeLinear;
+    }
+  }
+}
+
+function resumeWebAudioIfNeeded(): void {
+  if (sharedAudioContext && sharedAudioContext.state === "suspended") {
+    void sharedAudioContext.resume().catch(() => undefined);
+  }
+}
 
 function drawPanZoomCover(
   ctx: CanvasRenderingContext2D,
@@ -75,7 +152,18 @@ function drawCarbonDemoBackdrop(
   framing: FramingSegment,
   playheadMs: number,
   isColdOpen: boolean,
+  isGap = false,
 ) {
+  if (isGap) {
+    ctx.fillStyle = "#040406";
+    ctx.fillRect(0, 0, w, h);
+    ctx.fillStyle = "rgba(113, 113, 122, 0.55)";
+    ctx.font = "500 10px 'JetBrains Mono', monospace";
+    ctx.textAlign = "center";
+    ctx.fillText("TIMELINE GAP", w / 2, h / 2);
+    return;
+  }
+
   const t = playheadMs / 1000;
   if (framing.mode === "split") {
     const seamY = Math.round(h * framing.splitRatio);
@@ -121,7 +209,6 @@ function drawCarbonDemoBackdrop(
     ctx.fillStyle = bg;
     ctx.fillRect(0, 0, w, h);
 
-    // Subtle cinema framing reticle
     ctx.strokeStyle = "rgba(255, 255, 255, 0.05)";
     ctx.lineWidth = 1;
     ctx.beginPath();
@@ -139,31 +226,55 @@ function drawCarbonDemoBackdrop(
   );
 }
 
-export function StudioStage({ mediaUrl, bgmUrl, peaks }: StudioStageProps) {
+export function StudioStage({
+  mediaUrl,
+  bgmUrl,
+  peaks,
+  transport,
+}: StudioStageProps) {
   const {
     edl,
     playheadMs,
     isPlaying,
     playbackRate,
     selectedOverlayId,
+    selectedBrollId,
     setPlayheadMs,
     setIsPlaying,
     togglePlayback,
     selectOverlay,
+    selectBroll,
+    selectClip,
     updateFraming,
     updateOverlay,
+    duplicateOverlay,
+    removeOverlay,
+    updateBroll,
+    removeBroll,
+    updateAudio,
+    splitClipAtPlayhead,
+    insertFreezeFrame,
+    askAiOnSelection,
     mutateEdl,
   } = useTimelineStore();
 
   const canvasRef = useRef<HTMLCanvasElement | null>(null);
   const videoRef = useRef<HTMLVideoElement | null>(null);
+  const brollVideoRef = useRef<HTMLVideoElement | null>(null);
   const bgmAudioRef = useRef<HTMLAudioElement | null>(null);
+  const auxAudioRef = useRef<HTMLAudioElement | null>(null);
   const stageBoxRef = useRef<HTMLDivElement | null>(null);
   const duckGainRef = useRef<number>(1.0);
+
   const [muted, setMuted] = useState(false);
   const [editingCamCrop, setEditingCamCrop] = useState(false);
+  const [editingOverlayId, setEditingOverlayId] = useState<string | null>(null);
+  const [editingOverlayDraft, setEditingOverlayDraft] = useState<string>("");
+  const [contextMenu, setContextMenu] = useState<StudioContextMenuState | null>(
+    null,
+  );
 
-  // Live preview overrides while pointer-dragging (single undo commit on pointerUp)
+  // Live preview overrides while pointer-dragging
   const [dragSplitRatio, setDragSplitRatio] = useState<number | null>(null);
   const [dragCaptionMargin, setDragCaptionMargin] = useState<number | null>(null);
   const [dragPan, setDragPan] = useState<{ panX: number; panY: number } | null>(null);
@@ -172,34 +283,94 @@ export function StudioStage({ mediaUrl, bgmUrl, peaks }: StudioStageProps) {
     xRatio: number;
     yRatio: number;
   } | null>(null);
+  const [dragOverlayScale, setDragOverlayScale] = useState<{
+    id: string;
+    scale: number;
+  } | null>(null);
   const [dragCamBox, setDragCamBox] = useState<NormalizedBox | null>(null);
+  const [dragBrollBox, setDragBrollBox] = useState<{
+    id: string;
+    box: NormalizedBox;
+  } | null>(null);
 
-  const totalDurationMs = useMemo(() => (edl ? getTotalDurationMs(edl) : 0), [edl]);
-  const coldOpenMs = useMemo(() => (edl ? getColdOpenDurationMs(edl) : 0), [edl]);
+  const totalDurationMs = useMemo(
+    () => (edl ? getTotalDurationMs(edl) : 0),
+    [edl],
+  );
+  const coldOpenMs = useMemo(
+    () => (edl ? getColdOpenDurationMs(edl) : 0),
+    [edl],
+  );
+
+  const activeBroll = useMemo(() => {
+    if (!edl?.tracks.video.broll?.length) return null;
+    return (
+      edl.tracks.video.broll.find((b) => {
+        const dur = getBRollDurationMs(b);
+        return (
+          playheadMs >= b.timelineStartMs && playheadMs <= b.timelineStartMs + dur
+        );
+      }) ?? null
+    );
+  }, [edl?.tracks.video.broll, playheadMs]);
+
+  const activeBrollUrl = useMemo(() => {
+    if (!activeBroll || !transport) return null;
+    if (activeBroll.sourceId === edl?.sourceId && mediaUrl) return mediaUrl;
+    return transport.sourceMediaUrl(activeBroll.sourceId);
+  }, [activeBroll, transport, edl?.sourceId, mediaUrl]);
+
+  const activeAuxAudio = useMemo(() => {
+    if (!edl?.tracks.audio.clips?.length) return null;
+    return (
+      edl.tracks.audio.clips.find((ac) => {
+        if (ac.muted || (ac.gainDb ?? 0) <= -59.5) return false;
+        const dur = getAudioClipDurationMs(ac);
+        return (
+          playheadMs >= ac.timelineStartMs &&
+          playheadMs <= ac.timelineStartMs + dur
+        );
+      }) ?? null
+    );
+  }, [edl?.tracks.audio.clips, playheadMs]);
+
+  const activeAuxAudioUrl = useMemo(() => {
+    if (!activeAuxAudio || !transport) return null;
+    if (activeAuxAudio.assetId) {
+      return (
+        transport.sfxMediaUrl(activeAuxAudio.assetId) ??
+        transport.bgmMediaUrl(activeAuxAudio.assetId)
+      );
+    }
+    if (activeAuxAudio.sourceId) {
+      if (activeAuxAudio.sourceId === edl?.sourceId && mediaUrl) return mediaUrl;
+      return transport.sourceMediaUrl(activeAuxAudio.sourceId);
+    }
+    return null;
+  }, [activeAuxAudio, transport, edl?.sourceId, mediaUrl]);
 
   const cutBoundaries = useMemo(() => {
     if (!edl) return [];
+    const { spans } = buildClipSpans(edl);
     const list: {
       cutMs: number;
       kind: "flash_white" | "dip_black" | "dissolve";
       durationMs: number;
     }[] = [];
-    let cursor = getColdOpenDurationMs(edl);
-    edl.tracks.video.clips.forEach((clip, idx) => {
-      const dur = clip.sourceEndMs - clip.sourceStartMs;
-      const isFirstOverall = idx === 0 && cursor === 0;
+    spans.forEach((span, idx) => {
+      const clip = span.clip;
+      const isFirstOverall = idx === 0 && span.tStart === 0;
       if (
         !isFirstOverall &&
         clip.transitionIn &&
         clip.transitionIn !== "none"
       ) {
         list.push({
-          cutMs: cursor,
+          cutMs: span.tStart,
           kind: clip.transitionIn,
           durationMs: clip.transitionDurationMs ?? 240,
         });
       }
-      cursor += dur;
     });
     return list;
   }, [edl]);
@@ -222,10 +393,19 @@ export function StudioStage({ mediaUrl, bgmUrl, peaks }: StudioStageProps) {
     return [360, 640];
   }, [edl?.output.ratio]);
 
-  // 60fps playback ticker + Single-<video> + Live Auto-Ducked BGM <audio>
+  // Resume WebAudio context whenever playback starts
+  useEffect(() => {
+    if (isPlaying) {
+      resumeWebAudioIfNeeded();
+    }
+  }, [isPlaying]);
+
+  // 60fps playback ticker + WebAudio GainNode Mixer + V2 B-Roll + A1/A3 Audio
   useEffect(() => {
     if (!edl) return;
     const bgmNode = bgmAudioRef.current;
+    const auxNode = auxAudioRef.current;
+    const brollNode = brollVideoRef.current;
     let rafId = 0;
     let lastTs = performance.now();
 
@@ -250,25 +430,91 @@ export function StudioStage({ mediaUrl, bgmUrl, peaks }: StudioStageProps) {
         state.setPlayheadMs(nextMs);
       }
 
-      // 1. Sync hidden <video>
+      // 1. Sync V1 <video> + Live WebAudio Dialogue GainNode (-infinity dB .. +12 dB)
       const video = videoRef.current;
-      const mapped = timelineToSource(currentEdl, nextMs);
+      const pt = resolveTimelinePoint(currentEdl, nextMs);
+      const audCfg = currentEdl.tracks.audio;
+      const isVoiceTrackMuted =
+        muted || Boolean(audCfg.muteOriginal) || audCfg.gainDb <= -59.5;
+
       if (video && mediaUrl) {
-        video.muted = muted || Boolean(currentEdl.tracks.audio.muteOriginal);
-        const expectedSec = Math.max(0, (mapped.sourceMs - state.sliceOriginMs) / 1000);
+        let clipLinear = 1.0;
+        let clipSpeed = 1.0;
+        let isFrozen = false;
+        if (pt.isGap) {
+          clipLinear = 0;
+        } else if (pt.isColdOpen) {
+          const co = currentEdl.tracks.video.coldOpen;
+          if (co && co.fadeOutMs > 0 && pt.clipDurationMs - pt.clipElapsedMs < co.fadeOutMs) {
+            clipLinear *= Math.max(
+              0,
+              (pt.clipDurationMs - pt.clipElapsedMs) / co.fadeOutMs,
+            );
+          }
+        } else if (pt.clip) {
+          isFrozen = Boolean(pt.clip.freezeDurationMs && pt.clip.freezeDurationMs > 0);
+          clipSpeed = Math.max(0.25, pt.clip.speed ?? 1);
+          if (
+            isFrozen ||
+            pt.clip.muted ||
+            pt.clip.audioDetached ||
+            (pt.clip.gainDb ?? 0) <= -59.5
+          ) {
+            clipLinear = 0;
+          } else {
+            clipLinear *= dbToLinearGain(pt.clip.gainDb ?? 0);
+            const fi = pt.clip.fadeInMs ?? 0;
+            const fo = pt.clip.fadeOutMs ?? 0;
+            if (fi > 0 && pt.clipElapsedMs < fi) {
+              clipLinear *= pt.clipElapsedMs / fi;
+            }
+            if (fo > 0 && pt.clipDurationMs - pt.clipElapsedMs < fo) {
+              clipLinear *= Math.max(
+                0,
+                (pt.clipDurationMs - pt.clipElapsedMs) / fo,
+              );
+            }
+          }
+        }
+
+        const totalVoiceLinear = isVoiceTrackMuted
+          ? 0
+          : dbToLinearGain(audCfg.gainDb) * clipLinear;
+        applyLiveElementGain(video, totalVoiceLinear);
+
+        const originOffset =
+          pt.clip?.sourceId && pt.clip.sourceId !== currentEdl.sourceId
+            ? 0
+            : state.sliceOriginMs;
+        const expectedSec = Math.max(0, (pt.sourceMs - originOffset) / 1000);
         if (video.readyState >= 1) {
           const drift = Math.abs(video.currentTime - expectedSec);
-          if (!state.isPlaying || drift > 0.18 || state.playbackRate < 0) {
+          if (
+            !state.isPlaying ||
+            isFrozen ||
+            pt.isGap ||
+            Boolean(pt.clip?.reverse) ||
+            drift > 0.2
+          ) {
             if (drift > 0.03) {
               try {
                 video.currentTime = expectedSec;
               } catch {
-                // ignore seek while loading
+                // ignore seek while buffering
               }
             }
           }
-          if (state.isPlaying && state.playbackRate > 0) {
-            video.playbackRate = Math.max(0.25, Math.min(4, state.playbackRate));
+          if (
+            state.isPlaying &&
+            state.playbackRate > 0 &&
+            !isFrozen &&
+            !pt.isGap &&
+            !pt.clip?.reverse
+          ) {
+            video.playbackRate = Math.max(
+              0.25,
+              Math.min(4, state.playbackRate * clipSpeed),
+            );
             if (video.paused) {
               void video.play().catch(() => undefined);
             }
@@ -278,12 +524,94 @@ export function StudioStage({ mediaUrl, bgmUrl, peaks }: StudioStageProps) {
         }
       }
 
-      // 2. Sync hidden <audio> BGM bed + live RMS sidechain auto-ducking
+      // 2. Sync V2 B-Roll <video>
+      const brEl = brollVideoRef.current;
+      const curBroll = currentEdl.tracks.video.broll?.find((b) => {
+        const d = getBRollDurationMs(b);
+        return nextMs >= b.timelineStartMs && nextMs <= b.timelineStartMs + d;
+      });
+      if (brEl && curBroll && activeBrollUrl) {
+        const brElapsed = nextMs - curBroll.timelineStartMs;
+        const brSpd = Math.max(0.25, curBroll.speed ?? 1);
+        const brSec = (curBroll.sourceStartMs + brElapsed * brSpd) / 1000;
+        const brGain =
+          muted || (curBroll.muted ?? true)
+            ? 0
+            : dbToLinearGain(curBroll.gainDb ?? -60);
+        applyLiveElementGain(brEl, brGain);
+        if (brEl.readyState >= 1) {
+          if (Math.abs(brEl.currentTime - brSec) > 0.18 || !state.isPlaying) {
+            try {
+              brEl.currentTime = brSec;
+            } catch {
+              // ignore
+            }
+          }
+          if (state.isPlaying && state.playbackRate > 0) {
+            brEl.playbackRate = Math.max(0.25, Math.min(4, state.playbackRate * brSpd));
+            if (brEl.paused) void brEl.play().catch(() => undefined);
+          } else if (!brEl.paused) {
+            brEl.pause();
+          }
+        }
+      } else if (brEl && !brEl.paused) {
+        brEl.pause();
+      }
+
+      // 3. Sync A1 (Detached) / A3 (SFX) <audio>
+      const axEl = auxAudioRef.current;
+      const curAux = currentEdl.tracks.audio.clips?.find((ac) => {
+        if (ac.muted || (ac.gainDb ?? 0) <= -59.5) return false;
+        const d = getAudioClipDurationMs(ac);
+        return nextMs >= ac.timelineStartMs && nextMs <= ac.timelineStartMs + d;
+      });
+      if (axEl && curAux && activeAuxAudioUrl && !muted) {
+        const axElapsed = nextMs - curAux.timelineStartMs;
+        const axDur = getAudioClipDurationMs(curAux);
+        const axSpd = Math.max(0.25, curAux.speed ?? 1);
+        const axSec = (curAux.sourceStartMs + axElapsed * axSpd) / 1000;
+        let axLinear = dbToLinearGain(curAux.gainDb ?? 0);
+        if (curAux.kind === "detached") {
+          axLinear *= isVoiceTrackMuted ? 0 : dbToLinearGain(audCfg.gainDb);
+        }
+        if ((curAux.fadeInMs ?? 0) > 0 && axElapsed < (curAux.fadeInMs ?? 0)) {
+          axLinear *= axElapsed / (curAux.fadeInMs ?? 1);
+        }
+        if (
+          (curAux.fadeOutMs ?? 0) > 0 &&
+          axDur - axElapsed < (curAux.fadeOutMs ?? 0)
+        ) {
+          axLinear *= Math.max(0, (axDur - axElapsed) / (curAux.fadeOutMs ?? 1));
+        }
+        applyLiveElementGain(axEl, axLinear);
+        if (axEl.readyState >= 1) {
+          if (Math.abs(axEl.currentTime - axSec) > 0.2 || !state.isPlaying) {
+            try {
+              axEl.currentTime = axSec;
+            } catch {
+              // ignore
+            }
+          }
+          if (state.isPlaying && state.playbackRate > 0) {
+            axEl.playbackRate = Math.max(0.5, Math.min(4, state.playbackRate * axSpd));
+            if (axEl.paused) void axEl.play().catch(() => undefined);
+          } else if (!axEl.paused) {
+            axEl.pause();
+          }
+        }
+      } else if (axEl && !axEl.paused) {
+        axEl.pause();
+      }
+
+      // 4. Sync hidden <audio> BGM bed + live RMS sidechain auto-ducking
       const bgmEl = bgmAudioRef.current;
       const bgmCfg = currentEdl.tracks.audio.bgm;
-      if (bgmEl && bgmUrl && bgmCfg && !muted) {
+      if (bgmEl && bgmUrl && bgmCfg && !muted && bgmCfg.gainDb > -59.5) {
         const rawSec = ((bgmCfg.startOffsetMs ?? 0) + nextMs) / 1000;
-        const dur = Number.isFinite(bgmEl.duration) && bgmEl.duration > 0.2 ? bgmEl.duration : 0;
+        const dur =
+          Number.isFinite(bgmEl.duration) && bgmEl.duration > 0.2
+            ? bgmEl.duration
+            : 0;
         const targetBgmSec = dur > 0 ? rawSec % dur : rawSec;
         if (bgmEl.readyState >= 1) {
           const bDrift = Math.abs(bgmEl.currentTime - targetBgmSec);
@@ -296,8 +624,7 @@ export function StudioStage({ mediaUrl, bgmUrl, peaks }: StudioStageProps) {
               }
             }
           }
-          // Compute live gain + fade-in/out + smooth dialogue ducking
-          const baseLinear = Math.pow(10, (bgmCfg.gainDb ?? -16) / 20);
+          const baseLinear = dbToLinearGain(bgmCfg.gainDb ?? -16);
           const fadeInS = (bgmCfg.fadeInMs ?? 500) / 1000;
           const fadeOutS = (bgmCfg.fadeOutMs ?? 1000) / 1000;
           const curS = nextMs / 1000;
@@ -309,7 +636,12 @@ export function StudioStage({ mediaUrl, bgmUrl, peaks }: StudioStageProps) {
           }
 
           let targetDuck = 1.0;
-          if (bgmCfg.duckingEnabled && !currentEdl.tracks.audio.muteOriginal && peaks?.rms?.length) {
+          if (
+            bgmCfg.duckingEnabled &&
+            !isVoiceTrackMuted &&
+            !pt.isGap &&
+            peaks?.rms?.length
+          ) {
             const idx = Math.min(
               peaks.rms.length - 1,
               Math.max(0, Math.floor((nextMs / 1000) * peaks.rateHz)),
@@ -317,10 +649,12 @@ export function StudioStage({ mediaUrl, bgmUrl, peaks }: StudioStageProps) {
             const speechRms = peaks.rms[idx] ?? 0;
             targetDuck = speechRms > 0.14 ? 0.34 : 1.0;
           }
-          // Smooth attack (fast) and release (gentle Cinema swell)
           const alpha = targetDuck < duckGainRef.current ? 0.25 : 0.06;
           duckGainRef.current += (targetDuck - duckGainRef.current) * alpha;
-          bgmEl.volume = Math.max(0, Math.min(1, baseLinear * env * duckGainRef.current * 2.2));
+          applyLiveElementGain(
+            bgmEl,
+            baseLinear * env * duckGainRef.current * 2.2,
+          );
 
           if (state.isPlaying && state.playbackRate > 0) {
             bgmEl.playbackRate = Math.max(0.5, Math.min(2, state.playbackRate));
@@ -335,7 +669,7 @@ export function StudioStage({ mediaUrl, bgmUrl, peaks }: StudioStageProps) {
         bgmEl.pause();
       }
 
-      // 3. Paint 60fps composite onto <canvas>
+      // 5. Paint 60fps composite onto <canvas>
       const canvas = canvasRef.current;
       const ctx = canvas?.getContext("2d");
       const seg = getActiveFramingAt(currentEdl, nextMs);
@@ -349,7 +683,22 @@ export function StudioStage({ mediaUrl, bgmUrl, peaks }: StudioStageProps) {
         };
         ctx.clearRect(0, 0, canvas.width, canvas.height);
 
-        if (video && mediaUrl && video.readyState >= 2 && video.videoWidth > 0) {
+        if (pt.isGap) {
+          drawCarbonDemoBackdrop(
+            ctx,
+            canvas.width,
+            canvas.height,
+            liveSeg,
+            nextMs,
+            false,
+            true,
+          );
+        } else if (
+          video &&
+          mediaUrl &&
+          video.readyState >= 2 &&
+          video.videoWidth > 0
+        ) {
           const vw = video.videoWidth;
           const vh = video.videoHeight;
           const sc = liveSeg.sourceCropBox;
@@ -398,7 +747,18 @@ export function StudioStage({ mediaUrl, bgmUrl, peaks }: StudioStageProps) {
             } else {
               ctx.save();
               ctx.filter = "blur(16px) brightness(0.62)";
-              drawPanZoomCover(ctx, video, sx0, sy0, sw0, sh0, 0, 0, canvas.width, canvas.height);
+              drawPanZoomCover(
+                ctx,
+                video,
+                sx0,
+                sy0,
+                sw0,
+                sh0,
+                0,
+                0,
+                canvas.width,
+                canvas.height,
+              );
               ctx.restore();
             }
             const scale = Math.min(canvas.width / sw0, canvas.height / sh0);
@@ -440,11 +800,40 @@ export function StudioStage({ mediaUrl, bgmUrl, peaks }: StudioStageProps) {
             canvas.height,
             liveSeg,
             nextMs,
-            mapped.isColdOpen,
+            pt.isColdOpen,
           );
         }
 
-        // Paint zero-drift flash_white / dip_black transition overlays across slice cuts
+        // Paint V2 B-Roll / Picture-in-Picture layer when active
+        if (
+          brEl &&
+          curBroll &&
+          activeBrollUrl &&
+          brEl.readyState >= 2 &&
+          brEl.videoWidth > 0
+        ) {
+          const box =
+            dragBrollBox?.id === curBroll.id
+              ? dragBrollBox.box
+              : (curBroll.box ?? { x: 0.56, y: 0.06, w: 0.38, h: 0.28 });
+          ctx.save();
+          ctx.globalAlpha = Math.max(0.1, Math.min(1, curBroll.opacity ?? 1));
+          drawPanZoomCover(
+            ctx,
+            brEl,
+            0,
+            0,
+            brEl.videoWidth,
+            brEl.videoHeight,
+            box.x * canvas.width,
+            box.y * canvas.height,
+            box.w * canvas.width,
+            box.h * canvas.height,
+          );
+          ctx.restore();
+        }
+
+        // Paint zero-drift flash_white / dip_black transition overlays
         for (const cb of cutBoundaries) {
           const half = cb.durationMs * 0.5;
           const dist = Math.abs(nextMs - cb.cutMs);
@@ -466,8 +855,23 @@ export function StudioStage({ mediaUrl, bgmUrl, peaks }: StudioStageProps) {
     return () => {
       cancelAnimationFrame(rafId);
       if (bgmNode && !bgmNode.paused) bgmNode.pause();
+      if (auxNode && !auxNode.paused) auxNode.pause();
+      if (brollNode && !brollNode.paused) brollNode.pause();
     };
-  }, [edl, mediaUrl, bgmUrl, muted, peaks, cutBoundaries, dragSplitRatio, dragCamBox, dragPan]);
+  }, [
+    edl,
+    mediaUrl,
+    bgmUrl,
+    activeBrollUrl,
+    activeAuxAudioUrl,
+    muted,
+    peaks,
+    cutBoundaries,
+    dragSplitRatio,
+    dragCamBox,
+    dragPan,
+    dragBrollBox,
+  ]);
 
   const subtitleRenderGroup = useMemo(() => {
     if (!edl || !edl.tracks.subtitles.enabled) return { words: [], chunkIdx: 0 };
@@ -480,7 +884,8 @@ export function StudioStage({ mediaUrl, bgmUrl, peaks }: StudioStageProps) {
     if (mode === "single_word") {
       return { words: [words[activeIdx]], chunkIdx: activeIdx };
     }
-    const maxPerGroup = edl.tracks.subtitles.style.preset === "cinema_neon_glow" ? 4 : 3;
+    const maxPerGroup =
+      edl.tracks.subtitles.style.preset === "cinema_neon_glow" ? 4 : 3;
     const chunkIdx = Math.floor(activeIdx / maxPerGroup);
     const chunkStart = chunkIdx * maxPerGroup;
     const chunk = words.slice(chunkStart, chunkStart + maxPerGroup);
@@ -500,7 +905,148 @@ export function StudioStage({ mediaUrl, bgmUrl, peaks }: StudioStageProps) {
 
   if (!edl || !framing) return null;
 
+  function openStageContextMenu(e: React.MouseEvent) {
+    e.preventDefault();
+    const pt = resolveTimelinePoint(edl!, playheadMs);
+    const activeClip = pt.clip ?? edl!.tracks.video.clips[0];
+    if (activeClip) selectClip(activeClip.id);
+    const voiceMuted =
+      Boolean(edl!.tracks.audio.muteOriginal) ||
+      edl!.tracks.audio.gainDb <= -59.5;
+
+    setContextMenu({
+      x: e.clientX,
+      y: e.clientY,
+      header: `Canvas · ${activeClip?.label || "Main Scene"}`,
+      items: [
+        {
+          id: "split_here",
+          label: "Split Clip at Playhead",
+          shortcut: "Ctrl+B",
+          icon: <Scissors className="h-3.5 w-3.5" />,
+          onSelect: () => {
+            try {
+              splitClipAtPlayhead(playheadMs);
+            } catch {
+              // ignore edge
+            }
+          },
+        },
+        {
+          id: "freeze_here",
+          label: "Insert Freeze Frame (2.0s)",
+          icon: <Snowflake className="h-3.5 w-3.5" />,
+          onSelect: () => {
+            try {
+              insertFreezeFrame(playheadMs, 2000);
+            } catch {
+              // ignore edge
+            }
+          },
+        },
+        { divider: true },
+        {
+          id: "toggle_voice_mute",
+          label: voiceMuted ? "Unmute Original Audio (0 dB)" : "Mute Original Audio (-∞ dB)",
+          icon: voiceMuted ? (
+            <SpeakerHigh className="h-3.5 w-3.5" />
+          ) : (
+            <SpeakerSlash className="h-3.5 w-3.5" />
+          ),
+          onSelect: () =>
+            updateAudio({
+              muteOriginal: !voiceMuted,
+              gainDb: voiceMuted ? 0 : -60,
+            }),
+        },
+        {
+          id: "reset_pan_zoom",
+          label: "Reset Pan & Zoom (1.0×)",
+          icon: <CornersOut className="h-3.5 w-3.5" />,
+          onSelect: () => updateFraming({ panX: 0.5, panY: 0.5, zoom: 1.0 }),
+        },
+        { divider: true },
+        {
+          id: "ask_ai_scene",
+          label: "Ask AI Co-Editor on This Scene...",
+          tone: "ai",
+          icon: <MagicWand className="h-3.5 w-3.5" />,
+          onSelect: () =>
+            askAiOnSelection(
+              `Scene: ${activeClip?.label || "Active Clip"} @ ${formatTimecodeMs(playheadMs)}`,
+            ),
+        },
+      ],
+    });
+  }
+
+  function openOverlayContextMenu(e: React.MouseEvent, ov: OverlayItem) {
+    e.preventDefault();
+    e.stopPropagation();
+    selectOverlay(ov.id);
+    setContextMenu({
+      x: e.clientX,
+      y: e.clientY,
+      header: `Overlay · ${ov.text.slice(0, 24) || ov.kind}`,
+      items: [
+        {
+          id: "edit_ov",
+          label: "Edit Text Inline",
+          shortcut: "Dbl-Click",
+          icon: <PencilSimple className="h-3.5 w-3.5" />,
+          onSelect: () => {
+            setEditingOverlayId(ov.id);
+            setEditingOverlayDraft(ov.text);
+          },
+        },
+        {
+          id: "dup_ov",
+          label: "Duplicate Overlay",
+          shortcut: "Ctrl+D",
+          icon: <Copy className="h-3.5 w-3.5" />,
+          onSelect: () => duplicateOverlay(ov.id),
+        },
+        {
+          id: "full_dur_ov",
+          label: "Span Entire Timeline",
+          onSelect: () =>
+            updateOverlay(ov.id, { startMs: 0, endMs: totalDurationMs }),
+        },
+        {
+          id: "reset_scale_ov",
+          label: "Reset Size & Position (100%)",
+          onSelect: () =>
+            updateOverlay(ov.id, {
+              scale: 1.0,
+              xOffsetRatio: 0,
+              yOffsetRatio: 0,
+            }),
+        },
+        { divider: true },
+        {
+          id: "ask_ai_ov",
+          label: "Ask AI to Restyle / Rewrite...",
+          tone: "ai",
+          icon: <MagicWand className="h-3.5 w-3.5" />,
+          onSelect: () =>
+            askAiOnSelection(`Overlay "${ov.text.slice(0, 28)}" (${ov.kind})`),
+        },
+        {
+          id: "del_ov",
+          label: "Delete Overlay",
+          shortcut: "Del",
+          tone: "danger",
+          icon: <Trash className="h-3.5 w-3.5" />,
+          onSelect: () => removeOverlay(ov.id),
+        },
+      ],
+    });
+  }
+
   function startCanvasPanDrag(e: React.PointerEvent<HTMLCanvasElement>) {
+    if (e.button !== 0) return;
+    selectOverlay(null);
+    selectBroll(null);
     if (!framing || (framing.mode !== "crop" && framing.mode !== "centre")) return;
     e.preventDefault();
     const box = stageBoxRef.current?.getBoundingClientRect();
@@ -534,6 +1080,7 @@ export function StudioStage({ mediaUrl, bgmUrl, peaks }: StudioStageProps) {
   }
 
   function startSeamDrag(e: React.PointerEvent) {
+    if (e.button !== 0) return;
     e.preventDefault();
     const box = stageBoxRef.current?.getBoundingClientRect();
     if (!box) return;
@@ -555,6 +1102,7 @@ export function StudioStage({ mediaUrl, bgmUrl, peaks }: StudioStageProps) {
   }
 
   function startCaptionDrag(e: React.PointerEvent) {
+    if (e.button !== 0) return;
     e.preventDefault();
     const box = stageBoxRef.current?.getBoundingClientRect();
     if (!box) return;
@@ -582,25 +1130,34 @@ export function StudioStage({ mediaUrl, bgmUrl, peaks }: StudioStageProps) {
     overlayId: string,
     anchorBaseRatio: number,
     origXRatio: number,
+    origYRatio: number,
     allowHorizontal: boolean,
   ) {
+    if (e.button !== 0 || editingOverlayId === overlayId) return;
     e.preventDefault();
     e.stopPropagation();
     selectOverlay(overlayId);
     const box = stageBoxRef.current?.getBoundingClientRect();
     if (!box) return;
     const startX = e.clientX;
+    const startY = e.clientY;
     let latestX = origXRatio;
-    let latestY = 0;
+    let latestY = origYRatio;
+    let moved = false;
 
     function onMove(ev: PointerEvent) {
-      const pointerYRatio = (ev.clientY - box!.top) / box!.height;
+      const dx = (ev.clientX - startX) / box!.width;
+      const dy = (ev.clientY - startY) / box!.height;
+      if (Math.abs(dx) > 0.004 || Math.abs(dy) > 0.004) moved = true;
       latestY = Math.max(
         -0.5,
-        Math.min(0.5, Number((pointerYRatio - anchorBaseRatio).toFixed(3))),
+        Math.min(0.5, Number((origYRatio + dy).toFixed(3))),
       );
+      if (anchorBaseRatio === 0) {
+        const pointerYRatio = (ev.clientY - box!.top) / box!.height;
+        latestY = Math.max(0, Math.min(0.35, Number(pointerYRatio.toFixed(3))));
+      }
       if (allowHorizontal) {
-        const dx = (ev.clientX - startX) / box!.width;
         latestX = Math.max(-0.45, Math.min(0.45, Number((origXRatio + dx).toFixed(3))));
       }
       setDragOverlayPos({ id: overlayId, xRatio: latestX, yRatio: latestY });
@@ -609,10 +1166,88 @@ export function StudioStage({ mediaUrl, bgmUrl, peaks }: StudioStageProps) {
       window.removeEventListener("pointermove", onMove);
       window.removeEventListener("pointerup", onUp);
       setDragOverlayPos(null);
-      updateOverlay(overlayId, {
-        yOffsetRatio: latestY,
-        ...(allowHorizontal ? { xOffsetRatio: latestX } : {}),
-      });
+      if (moved) {
+        updateOverlay(overlayId, {
+          yOffsetRatio: latestY,
+          ...(allowHorizontal ? { xOffsetRatio: latestX } : {}),
+        });
+      }
+    }
+    window.addEventListener("pointermove", onMove);
+    window.addEventListener("pointerup", onUp);
+  }
+
+  function startOverlayScaleDrag(
+    e: React.PointerEvent,
+    overlayId: string,
+    origScale: number,
+  ) {
+    if (e.button !== 0) return;
+    e.preventDefault();
+    e.stopPropagation();
+    selectOverlay(overlayId);
+    const startX = e.clientX;
+    let latestScale = origScale;
+
+    function onMove(ev: PointerEvent) {
+      const delta = (ev.clientX - startX) / 140;
+      latestScale = Math.max(
+        0.4,
+        Math.min(2.5, Number((origScale + delta).toFixed(2))),
+      );
+      setDragOverlayScale({ id: overlayId, scale: latestScale });
+    }
+    function onUp() {
+      window.removeEventListener("pointermove", onMove);
+      window.removeEventListener("pointerup", onUp);
+      setDragOverlayScale(null);
+      if (latestScale !== origScale) {
+        updateOverlay(overlayId, { scale: latestScale });
+      }
+    }
+    window.addEventListener("pointermove", onMove);
+    window.addEventListener("pointerup", onUp);
+  }
+
+  function startBrollBoxDrag(
+    e: React.PointerEvent,
+    brollId: string,
+    origBox: NormalizedBox,
+    mode: "move" | "resize",
+  ) {
+    if (e.button !== 0) return;
+    e.preventDefault();
+    e.stopPropagation();
+    selectBroll(brollId);
+    const rect = stageBoxRef.current?.getBoundingClientRect();
+    if (!rect) return;
+    const startX = e.clientX;
+    const startY = e.clientY;
+    let latest = { ...origBox };
+
+    function onMove(ev: PointerEvent) {
+      const dx = (ev.clientX - startX) / rect!.width;
+      const dy = (ev.clientY - startY) / rect!.height;
+      if (mode === "move") {
+        latest = {
+          ...origBox,
+          x: Number(Math.max(0, Math.min(1 - origBox.w, origBox.x + dx)).toFixed(4)),
+          y: Number(Math.max(0, Math.min(1 - origBox.h, origBox.y + dy)).toFixed(4)),
+        };
+      } else {
+        latest = {
+          ...origBox,
+          w: Number(Math.max(0.12, Math.min(1 - origBox.x, origBox.w + dx)).toFixed(4)),
+          h: Number(Math.max(0.12, Math.min(1 - origBox.y, origBox.h + dy)).toFixed(4)),
+        };
+      }
+      setDragBrollBox({ id: brollId, box: latest });
+    }
+    function onUp() {
+      window.removeEventListener("pointermove", onMove);
+      window.removeEventListener("pointerup", onUp);
+      setDragBrollBox(null);
+      updateBroll(brollId, { box: latest });
     }
     window.addEventListener("pointermove", onMove);
     window.addEventListener("pointerup", onUp);
@@ -623,6 +1258,7 @@ export function StudioStage({ mediaUrl, bgmUrl, peaks }: StudioStageProps) {
     mode: "move" | "resize",
     container: HTMLDivElement,
   ) {
+    if (e.button !== 0) return;
     e.preventDefault();
     e.stopPropagation();
     const rect = container.getBoundingClientRect();
@@ -678,11 +1314,19 @@ export function StudioStage({ mediaUrl, bgmUrl, peaks }: StudioStageProps) {
 
   return (
     <section className="flex h-full flex-col bg-[#09090B]">
-      {/* Hidden Single-<video> & Synced Auto-Ducked BGM <audio> */}
+      {/* Hidden Media Pool routed through Live WebAudio GainNodes */}
       <video
         ref={videoRef}
         src={mediaUrl ?? undefined}
-        muted={muted}
+        crossOrigin="anonymous"
+        playsInline
+        preload="auto"
+        className="hidden"
+      />
+      <video
+        ref={brollVideoRef}
+        src={activeBrollUrl ?? undefined}
+        crossOrigin="anonymous"
         playsInline
         preload="auto"
         className="hidden"
@@ -690,7 +1334,15 @@ export function StudioStage({ mediaUrl, bgmUrl, peaks }: StudioStageProps) {
       <audio
         ref={bgmAudioRef}
         src={bgmUrl ?? undefined}
+        crossOrigin="anonymous"
         loop
+        preload="auto"
+        className="hidden"
+      />
+      <audio
+        ref={auxAudioRef}
+        src={activeAuxAudioUrl ?? undefined}
+        crossOrigin="anonymous"
         preload="auto"
         className="hidden"
       />
@@ -748,6 +1400,15 @@ export function StudioStage({ mediaUrl, bgmUrl, peaks }: StudioStageProps) {
         </div>
 
         <div className="flex items-center gap-2">
+          <span
+            title="Live WebAudio Dialogue Level"
+            className="tabular-tc rounded border border-[#24242C] bg-[#0C0C0F] px-1.5 py-0.5 text-[10px] text-[#A1A1AA]"
+          >
+            Voice:{" "}
+            {edl.tracks.audio.muteOriginal
+              ? "-∞ dB"
+              : formatDbLabel(edl.tracks.audio.gainDb)}
+          </span>
           {edl.tracks.audio.bgm && (
             <span
               title="Auto-ducked BGM bed active"
@@ -761,6 +1422,7 @@ export function StudioStage({ mediaUrl, bgmUrl, peaks }: StudioStageProps) {
             <button
               type="button"
               onClick={() => {
+                resumeWebAudioIfNeeded();
                 setPlayheadMs(0);
                 setIsPlaying(true);
               }}
@@ -787,10 +1449,13 @@ export function StudioStage({ mediaUrl, bgmUrl, peaks }: StudioStageProps) {
       </div>
 
       {/* Center Direct-Manipulation Stage */}
-      <div className="studio-stage-grid relative flex min-h-0 flex-1 items-center justify-center overflow-hidden p-3">
+      <div
+        onContextMenu={openStageContextMenu}
+        className="studio-stage-grid relative flex min-h-0 flex-1 items-center justify-center overflow-hidden p-3"
+      >
         <div
           ref={stageBoxRef}
-          className={`relative ${aspectClass} h-full max-h-[430px] select-none overflow-hidden rounded-lg border border-[#27272F] bg-black shadow-[0_18px_48px_rgba(0,0,0,0.75)]`}
+          className={`relative ${aspectClass} h-full max-h-[440px] select-none overflow-hidden rounded-lg border border-[#27272F] bg-black shadow-[0_18px_48px_rgba(0,0,0,0.75)]`}
         >
           <canvas
             ref={canvasRef}
@@ -799,8 +1464,8 @@ export function StudioStage({ mediaUrl, bgmUrl, peaks }: StudioStageProps) {
             onPointerDown={startCanvasPanDrag}
             title={
               framing.mode === "crop" || framing.mode === "centre"
-                ? "Drag directly on frame to pan speaker focus"
-                : undefined
+                ? "Drag to pan focus · Right-click for NLE actions"
+                : "Right-click for NLE actions"
             }
             className={`block h-full w-full ${
               framing.mode === "crop" || framing.mode === "centre"
@@ -809,7 +1474,96 @@ export function StudioStage({ mediaUrl, bgmUrl, peaks }: StudioStageProps) {
             }`}
           />
 
-          {/* Inner Rounded Cinema Border Overlay (JJ_EDIT style) */}
+          {/* Interactive V2 B-Roll / PiP Selection Handles */}
+          {activeBroll && (
+            <div
+              onPointerDown={(e) =>
+                startBrollBoxDrag(
+                  e,
+                  activeBroll.id,
+                  activeBroll.box ?? { x: 0.56, y: 0.06, w: 0.38, h: 0.28 },
+                  "move",
+                )
+              }
+              onContextMenu={(e) => {
+                e.preventDefault();
+                e.stopPropagation();
+                selectBroll(activeBroll.id);
+                setContextMenu({
+                  x: e.clientX,
+                  y: e.clientY,
+                  header: `B-Roll · ${activeBroll.label || "V2 Overlay"}`,
+                  items: [
+                    {
+                      id: "br_pip",
+                      label: "Picture-in-Picture Corner",
+                      onSelect: () =>
+                        updateBroll(activeBroll.id, {
+                          box: { x: 0.56, y: 0.06, w: 0.38, h: 0.28 },
+                        }),
+                    },
+                    {
+                      id: "br_full",
+                      label: "Full-Frame Cutaway (100%)",
+                      onSelect: () =>
+                        updateBroll(activeBroll.id, {
+                          box: { x: 0, y: 0, w: 1, h: 1 },
+                        }),
+                    },
+                    {
+                      id: "br_mute",
+                      label:
+                        activeBroll.muted ?? true
+                          ? "Unmute B-Roll Audio"
+                          : "Mute B-Roll Audio",
+                      onSelect: () =>
+                        updateBroll(activeBroll.id, {
+                          muted: !(activeBroll.muted ?? true),
+                          gainDb: activeBroll.muted ?? true ? 0 : -60,
+                        }),
+                    },
+                    { divider: true },
+                    {
+                      id: "br_del",
+                      label: "Delete B-Roll Clip",
+                      shortcut: "Del",
+                      tone: "danger",
+                      icon: <Trash className="h-3.5 w-3.5" />,
+                      onSelect: () => removeBroll(activeBroll.id),
+                    },
+                  ],
+                });
+              }}
+              style={{
+                left: `${((dragBrollBox?.id === activeBroll.id ? dragBrollBox.box.x : activeBroll.box?.x) ?? 0.56) * 100}%`,
+                top: `${((dragBrollBox?.id === activeBroll.id ? dragBrollBox.box.y : activeBroll.box?.y) ?? 0.06) * 100}%`,
+                width: `${((dragBrollBox?.id === activeBroll.id ? dragBrollBox.box.w : activeBroll.box?.w) ?? 0.38) * 100}%`,
+                height: `${((dragBrollBox?.id === activeBroll.id ? dragBrollBox.box.h : activeBroll.box?.h) ?? 0.28) * 100}%`,
+              }}
+              className={`absolute z-15 cursor-move rounded ${
+                selectedBrollId === activeBroll.id
+                  ? "ring-2 ring-[#F59E0B]"
+                  : "hover:ring-1 hover:ring-white/45"
+              }`}
+            >
+              {selectedBrollId === activeBroll.id && (
+                <div
+                  onPointerDown={(e) =>
+                    startBrollBoxDrag(
+                      e,
+                      activeBroll.id,
+                      activeBroll.box ?? { x: 0.56, y: 0.06, w: 0.38, h: 0.28 },
+                      "resize",
+                    )
+                  }
+                  title="Drag corner to resize B-Roll"
+                  className="absolute -bottom-1.5 -right-1.5 h-3 w-3 cursor-nwse-resize rounded-xs border border-[#09090B] bg-[#F59E0B]"
+                />
+              )}
+            </div>
+          )}
+
+          {/* Inner Rounded Cinema Border Overlay */}
           {borderStyle !== "none" && (
             <div className="pointer-events-none absolute inset-[2.2%] z-10 rounded-2xl border border-white/55">
               {borderStyle === "thin_rounded" && (
@@ -833,13 +1587,20 @@ export function StudioStage({ mediaUrl, bgmUrl, peaks }: StudioStageProps) {
             </div>
           )}
 
-          {/* Direct-Manipulation Overlays (POV Bar, Seam Card, 2D Watermark, Credits, CTA) */}
+          {/* Direct-Manipulation Overlays (Drag, Corner Resize, Dbl-Click Inline Edit & Right-Click) */}
           {visibleOverlays.map((ov) => {
             const isSelected = selectedOverlayId === ov.id;
+            const isEditingText = editingOverlayId === ov.id;
             const liveYOffset =
               dragOverlayPos?.id === ov.id ? dragOverlayPos.yRatio : ov.yOffsetRatio;
             const liveXOffset =
-              dragOverlayPos?.id === ov.id ? dragOverlayPos.xRatio : (ov.xOffsetRatio ?? 0);
+              dragOverlayPos?.id === ov.id
+                ? dragOverlayPos.xRatio
+                : (ov.xOffsetRatio ?? 0);
+            const liveScale =
+              dragOverlayScale?.id === ov.id
+                ? dragOverlayScale.scale
+                : (ov.scale ?? 1.0);
             const opacityVal = ov.opacity ?? 1;
 
             if (ov.kind === "pov_top_bar") {
@@ -847,17 +1608,45 @@ export function StudioStage({ mediaUrl, bgmUrl, peaks }: StudioStageProps) {
                 <div
                   key={ov.id}
                   onPointerDown={(e) =>
-                    startOverlay2DDrag(e, ov.id, 0, 0, false)
+                    startOverlay2DDrag(e, ov.id, 0, 0, ov.yOffsetRatio, false)
                   }
+                  onDoubleClick={(e) => {
+                    e.stopPropagation();
+                    setEditingOverlayId(ov.id);
+                    setEditingOverlayDraft(ov.text);
+                  }}
+                  onContextMenu={(e) => openOverlayContextMenu(e, ov)}
                   style={{
                     top: `${Math.max(0, Math.min(35, liveYOffset * 100))}%`,
                     opacity: opacityVal,
+                    fontSize: `${Math.round(11 * liveScale)}px`,
                   }}
-                  className={`font-caption-stage absolute inset-x-0 z-20 cursor-ns-resize border-b border-zinc-300 bg-white px-3 py-2 text-center text-[11px] font-extrabold uppercase tracking-[0.04em] text-[#09090B] shadow-md ${
+                  className={`font-caption-stage absolute inset-x-0 z-20 cursor-ns-resize border-b border-zinc-300 bg-white px-3 py-2 text-center font-extrabold uppercase tracking-[0.04em] text-[#09090B] shadow-md ${
                     isSelected ? "ring-2 ring-[#F59E0B]" : ""
                   }`}
                 >
-                  {ov.text}
+                  {isEditingText ? (
+                    <input
+                      autoFocus
+                      value={editingOverlayDraft}
+                      onChange={(e) => setEditingOverlayDraft(e.target.value)}
+                      onBlur={() => {
+                        updateOverlay(ov.id, { text: editingOverlayDraft });
+                        setEditingOverlayId(null);
+                      }}
+                      onKeyDown={(e) => {
+                        if (e.key === "Enter") {
+                          updateOverlay(ov.id, { text: editingOverlayDraft });
+                          setEditingOverlayId(null);
+                        } else if (e.key === "Escape") {
+                          setEditingOverlayId(null);
+                        }
+                      }}
+                      className="w-full rounded bg-zinc-100 px-1 text-center text-[#09090B] outline-none"
+                    />
+                  ) : (
+                    ov.text
+                  )}
                 </div>
               );
             }
@@ -868,40 +1657,19 @@ export function StudioStage({ mediaUrl, bgmUrl, peaks }: StudioStageProps) {
                 : ov.yAnchor === "top"
                   ? 0.11
                   : 0.85;
-            const topPct = Math.max(5, Math.min(94, (anchorBase + liveYOffset) * 100));
-            const leftPct = Math.max(8, Math.min(92, (0.5 + liveXOffset) * 100));
-
-            if (ov.kind === "watermark_tag") {
-              return (
-                <div
-                  key={ov.id}
-                  onPointerDown={(e) =>
-                    startOverlay2DDrag(e, ov.id, anchorBase, ov.xOffsetRatio ?? 0, true)
-                  }
-                  title="Drag 2D anywhere on frame to position watermark"
-                  style={{
-                    top: `${topPct}%`,
-                    left: `${leftPct}%`,
-                    opacity: opacityVal,
-                    textShadow: "0 2px 8px rgba(0,0,0,0.85)",
-                  }}
-                  className={`font-caption-stage absolute z-20 -translate-x-1/2 -translate-y-1/2 cursor-move px-2 py-0.5 text-[10px] font-bold uppercase tracking-[0.26em] whitespace-nowrap text-white ${
-                    isSelected ? "rounded ring-1 ring-[#F59E0B]" : ""
-                  }`}
-                >
-                  {ov.text}
-                </div>
-              );
-            }
+            const topPct = Math.max(4, Math.min(95, (anchorBase + liveYOffset) * 100));
+            const leftPct = Math.max(6, Math.min(94, (0.5 + liveXOffset) * 100));
 
             const cardTone =
-              ov.kind === "seam_card_white"
-                ? "bg-white text-[#09090B] shadow-lg rounded-md px-3 py-1.5 font-extrabold"
-                : ov.kind === "cta_pill"
-                  ? "bg-[#F59E0B] text-[#09090B] shadow-lg rounded-full px-3 py-1 font-bold"
-                  : ov.kind === "cinema_credit"
-                    ? "bg-[#09090B]/85 text-[#F4F4F5] border border-white/25 rounded-full px-3 py-1 text-[10px] font-semibold tracking-wider uppercase"
-                    : "bg-[#09090B]/90 text-[#F4F4F5] border border-white/20 rounded-md px-3 py-1.5 font-bold";
+              ov.kind === "watermark_tag"
+                ? "font-caption-stage px-2 py-0.5 text-[10px] font-bold uppercase tracking-[0.26em] whitespace-nowrap text-white [text-shadow:0_2px_8px_rgba(0,0,0,0.85)]"
+                : ov.kind === "seam_card_white"
+                  ? "bg-white text-[#09090B] shadow-lg rounded-md px-3 py-1.5 font-extrabold"
+                  : ov.kind === "cta_pill"
+                    ? "bg-[#F59E0B] text-[#09090B] shadow-lg rounded-full px-3 py-1 font-bold"
+                    : ov.kind === "cinema_credit"
+                      ? "bg-[#09090B]/85 text-[#F4F4F5] border border-white/25 rounded-full px-3 py-1 text-[10px] font-semibold tracking-wider uppercase"
+                      : "bg-[#09090B]/90 text-[#F4F4F5] border border-white/20 rounded-md px-3 py-1.5 font-bold";
 
             const displayTxt =
               ov.kind === "cinema_credit" && !ov.text.includes("·")
@@ -912,24 +1680,69 @@ export function StudioStage({ mediaUrl, bgmUrl, peaks }: StudioStageProps) {
               <div
                 key={ov.id}
                 onPointerDown={(e) =>
-                  startOverlay2DDrag(e, ov.id, anchorBase, ov.xOffsetRatio ?? 0, true)
+                  startOverlay2DDrag(
+                    e,
+                    ov.id,
+                    anchorBase,
+                    ov.xOffsetRatio ?? 0,
+                    ov.yOffsetRatio,
+                    true,
+                  )
                 }
-                title="Drag to position overlay"
+                onDoubleClick={(e) => {
+                  e.stopPropagation();
+                  setEditingOverlayId(ov.id);
+                  setEditingOverlayDraft(ov.text);
+                }}
+                onContextMenu={(e) => openOverlayContextMenu(e, ov)}
+                title="Drag to move · Double-click to edit · Right-click for options"
                 style={{
                   top: `${topPct}%`,
                   left: `${leftPct}%`,
                   opacity: opacityVal,
+                  transform: `translate(-50%, -50%) scale(${liveScale})`,
                 }}
-                className={`absolute z-20 max-w-[88%] -translate-x-1/2 -translate-y-1/2 cursor-grab text-center text-[11px] leading-tight active:cursor-grabbing ${cardTone} ${
-                  isSelected ? "ring-2 ring-[#F59E0B]" : ""
+                className={`absolute z-20 max-w-[88%] cursor-grab text-center text-[11px] leading-tight active:cursor-grabbing ${cardTone} ${
+                  isSelected ? "ring-2 ring-[#F59E0B]" : "hover:ring-1 hover:ring-white/45"
                 }`}
               >
-                {displayTxt}
+                {isEditingText ? (
+                  <input
+                    autoFocus
+                    value={editingOverlayDraft}
+                    onChange={(e) => setEditingOverlayDraft(e.target.value)}
+                    onBlur={() => {
+                      updateOverlay(ov.id, { text: editingOverlayDraft });
+                      setEditingOverlayId(null);
+                    }}
+                    onKeyDown={(e) => {
+                      if (e.key === "Enter") {
+                        updateOverlay(ov.id, { text: editingOverlayDraft });
+                        setEditingOverlayId(null);
+                      } else if (e.key === "Escape") {
+                        setEditingOverlayId(null);
+                      }
+                    }}
+                    className="min-w-[120px] rounded bg-[#09090B] px-1.5 py-0.5 text-center text-white outline-none"
+                  />
+                ) : (
+                  displayTxt
+                )}
+
+                {isSelected && !isEditingText && (
+                  <div
+                    onPointerDown={(e) =>
+                      startOverlayScaleDrag(e, ov.id, ov.scale ?? 1.0)
+                    }
+                    title="Drag corner to scale overlay"
+                    className="absolute -bottom-1.5 -right-1.5 h-3 w-3 cursor-nwse-resize rounded-xs border border-[#09090B] bg-[#F59E0B]"
+                  />
+                )}
               </div>
             );
           })}
 
-          {/* Direct-Manipulation Captions (Standard, Karaoke, Cinema Neon Glow & Viral Punch Glow) */}
+          {/* Direct-Manipulation Captions */}
           {subtitleRenderGroup.words.length > 0 && (
             <div
               onPointerDown={startCaptionDrag}
@@ -939,12 +1752,8 @@ export function StudioStage({ mediaUrl, bgmUrl, peaks }: StudioStageProps) {
             >
               <span
                 className={`font-caption-stage inline-flex flex-wrap justify-center gap-1.5 px-2 py-0.5 text-sm font-black ${
-                  subStyle.preset === "boxed"
-                    ? "rounded bg-black/75"
-                    : ""
-                } ${
-                  subStyle.preset === "clean_lower" ? "" : "uppercase"
-                }`}
+                  subStyle.preset === "boxed" ? "rounded bg-black/75" : ""
+                } ${subStyle.preset === "clean_lower" ? "" : "uppercase"}`}
                 style={{
                   letterSpacing:
                     subStyle.preset === "cinema_neon_glow"
@@ -1020,7 +1829,9 @@ export function StudioStage({ mediaUrl, bgmUrl, peaks }: StudioStageProps) {
                     <span
                       key={w.id}
                       style={{
-                        color: isCurrent ? subStyle.accentColor : subStyle.primaryColor,
+                        color: isCurrent
+                          ? subStyle.accentColor
+                          : subStyle.primaryColor,
                         textShadow: "0 2px 6px rgba(0,0,0,0.92)",
                       }}
                     >
@@ -1032,7 +1843,6 @@ export function StudioStage({ mediaUrl, bgmUrl, peaks }: StudioStageProps) {
             </div>
           )}
 
-          {/* Cold-Open Indicator */}
           {playheadMs < coldOpenMs && (
             <span className="tabular-tc pointer-events-none absolute left-2.5 top-2.5 z-30 rounded border border-[#F59E0B]/50 bg-[#09090B]/90 px-1.5 py-0.5 text-[9px] font-semibold uppercase tracking-wider text-[#FBBF24]">
               Cold Open
@@ -1049,17 +1859,13 @@ export function StudioStage({ mediaUrl, bgmUrl, peaks }: StudioStageProps) {
                   Position Facecam Region
                 </span>
                 <span className="tabular-tc text-[11px] text-[#A1A1AA]">
-                  x:{(activeCamBox.x * 100).toFixed(0)}% y:{(activeCamBox.y * 100).toFixed(0)}% ·{" "}
-                  {(activeCamBox.w * 100).toFixed(0)}×{(activeCamBox.h * 100).toFixed(0)}%
+                  x:{(activeCamBox.x * 100).toFixed(0)}% y:
+                  {(activeCamBox.y * 100).toFixed(0)}% ·{" "}
+                  {(activeCamBox.w * 100).toFixed(0)}×
+                  {(activeCamBox.h * 100).toFixed(0)}%
                 </span>
               </div>
-              <div
-                className="studio-stage-grid relative aspect-video w-full overflow-hidden rounded-md border border-[#2C2C35]"
-                ref={(el) => {
-                  if (!el) return;
-                  el.dataset.camCropHost = "1";
-                }}
-              >
+              <div className="studio-stage-grid relative aspect-video w-full overflow-hidden rounded-md border border-[#2C2C35]">
                 <div
                   onPointerDown={(e) => {
                     const host = e.currentTarget.parentElement as HTMLDivElement;
@@ -1079,7 +1885,8 @@ export function StudioStage({ mediaUrl, bgmUrl, peaks }: StudioStageProps) {
                   <div
                     onPointerDown={(e) => {
                       const host =
-                        e.currentTarget.parentElement!.parentElement as HTMLDivElement;
+                        e.currentTarget.parentElement!
+                          .parentElement as HTMLDivElement;
                       startCamBoxDrag(e, "resize", host);
                     }}
                     className="absolute -bottom-1.5 -right-1.5 h-3 w-3 cursor-nwse-resize rounded-xs border border-[#09090B] bg-[#F59E0B]"
@@ -1104,7 +1911,10 @@ export function StudioStage({ mediaUrl, bgmUrl, peaks }: StudioStageProps) {
           </button>
           <button
             type="button"
-            onClick={togglePlayback}
+            onClick={() => {
+              resumeWebAudioIfNeeded();
+              togglePlayback();
+            }}
             title="Play / Pause (Space)"
             className="flex h-7 w-7 items-center justify-center rounded-md bg-[#F59E0B] text-[#09090B] transition-colors hover:bg-[#FBBF24]"
           >
@@ -1117,7 +1927,7 @@ export function StudioStage({ mediaUrl, bgmUrl, peaks }: StudioStageProps) {
           <button
             type="button"
             onClick={() => setMuted((m) => !m)}
-            title={muted ? "Unmute Stage" : "Mute Stage"}
+            title={muted ? "Unmute Stage Monitor" : "Mute Stage Monitor"}
             className="rounded p-1 text-[#A1A1AA] hover:bg-[#1C1C22] hover:text-[#F4F4F5]"
           >
             {muted ? (
@@ -1136,9 +1946,14 @@ export function StudioStage({ mediaUrl, bgmUrl, peaks }: StudioStageProps) {
 
         <div className="tabular-tc text-[10px] text-[#71717A]">
           {playbackRate !== 1 ? `${playbackRate}x · ` : ""}
-          SPACE · J/K/L · I/O · S
+          V/B · CTRL+B · DEL · SPACE
         </div>
       </div>
+
+      <StudioContextMenu
+        menu={contextMenu}
+        onClose={() => setContextMenu(null)}
+      />
     </section>
   );
 }

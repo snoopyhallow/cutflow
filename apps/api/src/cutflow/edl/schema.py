@@ -77,18 +77,61 @@ class VideoSlice(EdlModel):
     source_end_ms: int = Field(ge=1)
     source_id: str | None = None
     label: str = ""
+    timeline_start_ms: int | None = Field(default=None, ge=0)
+    speed: float = Field(default=1.0, ge=0.25, le=4.0)
+    reverse: bool = False
+    freeze_duration_ms: int = Field(default=0, ge=0, le=30000)
+    gain_db: float = Field(default=0.0, ge=-60.0, le=12.0)
+    muted: bool = False
+    audio_detached: bool = False
+    fade_in_ms: int = Field(default=0, ge=0, le=5000)
+    fade_out_ms: int = Field(default=0, ge=0, le=5000)
     transition_in: TransitionKindLiteral = "none"
     transition_duration_ms: int = Field(default=220, ge=80, le=800)
     transition_sfx: TransitionSfxLiteral = "none"
 
     @property
-    def duration_ms(self) -> int:
+    def raw_source_duration_ms(self) -> int:
         return self.source_end_ms - self.source_start_ms
+
+    @property
+    def duration_ms(self) -> int:
+        if self.freeze_duration_ms > 0:
+            return self.freeze_duration_ms
+        raw = self.source_end_ms - self.source_start_ms
+        return max(60, int(round(raw / max(0.25, float(self.speed)))))
 
     @model_validator(mode="after")
     def _check_bounds(self) -> VideoSlice:
         if self.source_end_ms <= self.source_start_ms:
             raise ValueError("sourceEndMs must be greater than sourceStartMs.")
+        return self
+
+
+class BRollClip(EdlModel):
+    id: str = Field(min_length=1)
+    source_id: str = Field(min_length=1)
+    label: str = ""
+    source_start_ms: int = Field(ge=0)
+    source_end_ms: int = Field(ge=1)
+    timeline_start_ms: int = Field(ge=0)
+    speed: float = Field(default=1.0, ge=0.25, le=4.0)
+    opacity: float = Field(default=1.0, ge=0.1, le=1.0)
+    box: NormalizedBox | None = Field(
+        default_factory=lambda: NormalizedBox(x=0.56, y=0.06, w=0.38, h=0.28)
+    )
+    gain_db: float = Field(default=-60.0, ge=-60.0, le=12.0)
+    muted: bool = True
+
+    @property
+    def duration_ms(self) -> int:
+        raw = self.source_end_ms - self.source_start_ms
+        return max(60, int(round(raw / max(0.25, float(self.speed)))))
+
+    @model_validator(mode="after")
+    def _check_bounds(self) -> BRollClip:
+        if self.source_end_ms <= self.source_start_ms:
+            raise ValueError("BRollClip sourceEndMs must be greater than sourceStartMs.")
         return self
 
 
@@ -117,23 +160,52 @@ class VideoTrack(EdlModel):
     cold_open: ColdOpenBlock | None = None
     clips: list[VideoSlice] = Field(min_length=1)
     framing: list[FramingSegment] = Field(min_length=1)
+    broll: list[BRollClip] = Field(default_factory=list)
 
 
 class BgmTrack(EdlModel):
     asset_id: str = Field(min_length=1)
-    gain_db: float = Field(default=-16.0, ge=-48.0, le=12.0)
+    gain_db: float = Field(default=-16.0, ge=-60.0, le=12.0)
     ducking_enabled: bool = True
     start_offset_ms: int = Field(default=0, ge=0)
     fade_in_ms: int = Field(default=500, ge=0, le=5000)
     fade_out_ms: int = Field(default=1000, ge=0, le=5000)
 
 
+class AudioClipItem(EdlModel):
+    id: str = Field(min_length=1)
+    kind: Literal["detached", "sfx", "audio"] = "sfx"
+    asset_id: str | None = None
+    source_id: str | None = None
+    label: str = ""
+    source_start_ms: int = Field(default=0, ge=0)
+    source_end_ms: int = Field(ge=1)
+    timeline_start_ms: int = Field(default=0, ge=0)
+    speed: float = Field(default=1.0, ge=0.25, le=4.0)
+    gain_db: float = Field(default=0.0, ge=-60.0, le=12.0)
+    muted: bool = False
+    fade_in_ms: int = Field(default=0, ge=0, le=5000)
+    fade_out_ms: int = Field(default=0, ge=0, le=5000)
+
+    @property
+    def duration_ms(self) -> int:
+        raw = self.source_end_ms - self.source_start_ms
+        return max(60, int(round(raw / max(0.25, float(self.speed)))))
+
+    @model_validator(mode="after")
+    def _check_bounds(self) -> AudioClipItem:
+        if self.source_end_ms <= self.source_start_ms:
+            raise ValueError("AudioClipItem sourceEndMs must be greater than sourceStartMs.")
+        return self
+
+
 class AudioTrack(EdlModel):
-    gain_db: float = Field(default=0.0, ge=-24.0, le=24.0)
+    gain_db: float = Field(default=0.0, ge=-60.0, le=24.0)
     normalize_lufs: float = Field(default=-14.0, ge=-36.0, le=-5.0)
     dialogue_enhance: bool = False
     mute_original: bool = False
     bgm: BgmTrack | None = None
+    clips: list[AudioClipItem] = Field(default_factory=list)
 
 
 class SubtitleStyle(EdlModel):
@@ -189,6 +261,7 @@ class OverlayItem(EdlModel):
     y_offset_ratio: float = Field(default=0.0, ge=-0.5, le=0.5)
     x_offset_ratio: float = Field(default=0.0, ge=-0.5, le=0.5)
     opacity: float = Field(default=1.0, ge=0.1, le=1.0)
+    scale: float = Field(default=1.0, ge=0.4, le=2.5)
     max_lines: int = Field(default=2, ge=1, le=4)
 
     @model_validator(mode="after")

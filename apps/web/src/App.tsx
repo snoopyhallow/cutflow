@@ -1,12 +1,16 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState, type CSSProperties } from "react";
 import {
   ArrowClockwise,
   ArrowCounterClockwise,
+  CornersOut,
   Export,
+  House,
+  Minus,
   Scissors,
   Sliders,
   TrayArrowDown,
   UserFocus,
+  X,
 } from "@phosphor-icons/react";
 import { CutFlowLogo } from "./components/ui/BrandIcons";
 import { getColdOpenDurationMs, getTotalDurationMs } from "./edl";
@@ -14,6 +18,7 @@ import { CreatorsPage } from "./pages/CreatorsPage";
 import { DashboardPage } from "./pages/DashboardPage";
 import { EditorStudioPage } from "./pages/EditorStudioPage";
 import { ExportsPage } from "./pages/ExportsPage";
+import { HomeHubPage } from "./pages/HomeHubPage";
 import {
   SettingsPage,
   type IngestSettingsState,
@@ -23,6 +28,7 @@ import { useTimelineStore } from "./state/timelineStore";
 import {
   createTransport,
   DemoTransport,
+  getDesktopBridge,
   type BgmAssetItem,
   type ClipProjectSummary,
   type ClipStatus,
@@ -37,9 +43,16 @@ import {
   type StudioTransport,
 } from "./transport";
 
-type StudioTab = "dashboard" | "editor" | "creators" | "exports" | "settings";
+type StudioTab =
+  | "home"
+  | "dashboard"
+  | "editor"
+  | "creators"
+  | "exports"
+  | "settings";
 
 const TAB_TITLES: Record<StudioTab, string> = {
+  home: "Home Hub",
   dashboard: "Media & Ingest",
   editor: "Cut Room",
   creators: "Creator Profiles",
@@ -47,8 +60,11 @@ const TAB_TITLES: Record<StudioTab, string> = {
   settings: "Studio Settings",
 };
 
+const DRAG_REGION_STYLE = { WebkitAppRegion: "drag" } as CSSProperties;
+const NO_DRAG_STYLE = { WebkitAppRegion: "no-drag" } as CSSProperties;
+
 export default function App() {
-  const [activeTab, setActiveTab] = useState<StudioTab>("dashboard");
+  const [activeTab, setActiveTab] = useState<StudioTab>("home");
   const [transport, setTransport] = useState<StudioTransport>(() => createTransport());
   const [health, setHealth] = useState<HealthResponse | null>(null);
   const [profiles, setProfiles] = useState<CreatorProfile[]>([]);
@@ -66,8 +82,8 @@ export default function App() {
   const [editorBoundaries, setEditorBoundaries] = useState<string>("");
   const [modelRouting, setModelRouting] = useState<ModelRoutingState>({
     active_provider: "gemini",
-    scan_model: "gemini-2.5-flash",
-    editor_model: "gemini-2.5-flash",
+    scan_model: "gemini-3.5-flash-lite",
+    editor_model: "gemini-3.5-flash-lite",
     ollama_url: "http://127.0.0.1:11434",
   });
   const [ingestConfig, setIngestConfig] = useState<IngestSettingsState>({
@@ -77,6 +93,8 @@ export default function App() {
   const [keysPresent, setKeysPresent] = useState<Record<string, boolean>>({});
   const [statusMessage, setStatusMessage] = useState<string>("");
   const sseUnsubsRef = useRef<Map<string, () => void>>(new Map());
+
+  const desktopBridge = getDesktopBridge();
 
   const {
     edl,
@@ -132,8 +150,8 @@ export default function App() {
     if (modCfg) {
       setModelRouting({
         active_provider: modCfg.active_provider ?? "gemini",
-        scan_model: modCfg.scan_model ?? "gemini-2.5-flash",
-        editor_model: modCfg.editor_model ?? "gemini-2.5-flash",
+        scan_model: modCfg.scan_model ?? "gemini-3.5-flash-lite",
+        editor_model: modCfg.editor_model ?? "gemini-3.5-flash-lite",
         ollama_url: modCfg.providers?.ollama?.base_url ?? "http://127.0.0.1:11434",
       });
     }
@@ -260,9 +278,10 @@ export default function App() {
     return () => clearTimeout(timer);
   }, [dirty, edl, activeProjectId, transport, markSaved]);
 
-  // Global Pro NLE Keyboard Shortcuts (Space, J/K/L, I/O, S, Delete, Ctrl+Z / Ctrl+Shift+Z)
+  // Global Pro NLE Keyboard Shortcuts (complementing MultiTrackTimeline shortcuts)
   useEffect(() => {
     function onKeyDown(e: KeyboardEvent) {
+      if (e.defaultPrevented) return;
       const target = e.target as HTMLElement | null;
       if (
         target &&
@@ -286,26 +305,7 @@ export default function App() {
       const store = useTimelineStore.getState();
       if (!store.edl) return;
 
-      if (e.code === "Space") {
-        e.preventDefault();
-        store.togglePlayback();
-      } else if (key === "k") {
-        e.preventDefault();
-        store.setIsPlaying(false);
-        store.setPlaybackRate(1);
-      } else if (key === "l") {
-        e.preventDefault();
-        const nextRate =
-          store.isPlaying && store.playbackRate >= 1
-            ? Math.min(4, store.playbackRate * 2)
-            : 1;
-        store.setPlaybackRate(nextRate);
-        store.setIsPlaying(true);
-      } else if (key === "j") {
-        e.preventDefault();
-        store.setPlaybackRate(-1.5);
-        store.setIsPlaying(true);
-      } else if (key === "i") {
+      if (key === "i") {
         e.preventDefault();
         store.setInPointMs(store.playheadMs);
       } else if (key === "o") {
@@ -341,14 +341,6 @@ export default function App() {
         e.preventDefault();
         store.setIsPlaying(false);
         store.setPlayheadMs(store.playheadMs + (e.shiftKey ? 500 : 33));
-      } else if (e.key === "Delete" || e.key === "Backspace") {
-        if (store.selectedWordId) {
-          e.preventDefault();
-          store.removeWord(store.selectedWordId);
-        } else if (store.selectedOverlayId) {
-          e.preventDefault();
-          store.removeOverlay(store.selectedOverlayId);
-        }
       }
     }
     window.addEventListener("keydown", onKeyDown);
@@ -361,7 +353,7 @@ export default function App() {
       setActiveTab("editor");
     } catch (err) {
       setStatusMessage(
-        `Could not open clip: ${err instanceof Error ? err.message : String(err)}`,
+        `Could not open project: ${err instanceof Error ? err.message : String(err)}`,
       );
     }
   }
@@ -382,19 +374,22 @@ export default function App() {
     }
   }
 
-  async function handleExportActiveProject() {
-    if (!activeProjectId || !edl) return;
+  async function handleExportProjectById(projectId: string) {
     setExportingNow(true);
     try {
-      if (dirty) {
-        await transport.saveTimeline(activeProjectId, edl);
+      if (projectId === activeProjectId && dirty && edl) {
+        await transport.saveTimeline(projectId, edl);
         markSaved();
       }
-      await transport.exportProject(activeProjectId, {
-        ratio: edl.output.ratio,
-        quality: edl.output.quality,
-        speedPreset: edl.output.speedPreset,
-      });
+      const opts =
+        projectId === activeProjectId && edl
+          ? {
+              ratio: edl.output.ratio,
+              quality: edl.output.quality,
+              speedPreset: edl.output.speedPreset,
+            }
+          : undefined;
+      await transport.exportProject(projectId, opts);
       await refreshWorkspace(transport);
       setActiveTab("exports");
     } catch (err) {
@@ -406,12 +401,31 @@ export default function App() {
     }
   }
 
+  async function handleExportActiveProject() {
+    if (!activeProjectId || !edl) return;
+    await handleExportProjectById(activeProjectId);
+  }
+
   const activeMediaUrl = useMemo(() => {
     if (!activeProjectId) return null;
     const summary = projects.find((p) => p.id === activeProjectId);
-    if (!summary?.hasSlice) return null;
-    return transport.projectMediaUrl(activeProjectId);
-  }, [activeProjectId, projects, transport]);
+    if (summary?.hasSlice) {
+      return transport.projectMediaUrl(activeProjectId);
+    }
+    if (transport.mode === "local") {
+      const clipSourceId =
+        edl?.tracks.video.clips.find((c) => Boolean(c.sourceId))?.sourceId ||
+        edl?.sourceId ||
+        summary?.sourceId;
+      if (clipSourceId) {
+        return (
+          transport.sourceMediaUrl(clipSourceId) ??
+          transport.projectMediaUrl(activeProjectId)
+        );
+      }
+    }
+    return null;
+  }, [activeProjectId, projects, edl, transport]);
 
   const activeFilmstripUrl = useMemo(() => {
     if (!activeProjectId) return null;
@@ -430,6 +444,7 @@ export default function App() {
     icon: typeof TrayArrowDown;
     badge?: number;
   }[] = [
+    { id: "home", label: "Home Hub", icon: House },
     {
       id: "dashboard",
       label: "Media & Ingest",
@@ -448,7 +463,7 @@ export default function App() {
   ];
 
   return (
-    <div className="flex h-screen overflow-hidden bg-[#09090B] text-[#F4F4F5]">
+    <div className="flex h-screen select-none overflow-hidden bg-[#09090B] text-[#F4F4F5]">
       {/* Desktop Studio Left Icon Rail */}
       <aside
         aria-label="Primary Navigation"
@@ -457,9 +472,9 @@ export default function App() {
         <div className="flex flex-col items-center gap-3">
           <button
             type="button"
-            onClick={() => setActiveTab("dashboard")}
-            title="CutFlow Studio"
-            className="flex h-9 w-9 items-center justify-center rounded-lg border border-[#282830] bg-[#141418] text-[#F4F4F5] transition-colors hover:border-[#3A3A44]"
+            onClick={() => setActiveTab("home")}
+            title="CutFlow Home Hub"
+            className="flex h-9 w-9 items-center justify-center rounded-lg border border-[#282830] bg-[#141418] text-[#F4F4F5] transition-colors hover:border-[#F59E0B]/60"
           >
             <CutFlowLogo className="h-5 w-5" />
           </button>
@@ -521,7 +536,10 @@ export default function App() {
 
       {/* Right Studio Column: Slim Context Topbar + Active Workspace */}
       <div className="flex min-w-0 flex-1 flex-col overflow-hidden">
-        <header className="flex h-10 shrink-0 items-center justify-between border-b border-[#222228] bg-[#0E0E11] px-4">
+        <header
+          style={desktopBridge ? DRAG_REGION_STYLE : undefined}
+          className="flex h-10 shrink-0 items-center justify-between border-b border-[#222228] bg-[#0E0E11] pl-4 pr-2"
+        >
           <div className="flex min-w-0 items-center gap-2 text-xs">
             <span className="font-semibold tracking-tight text-[#F4F4F5]">CutFlow</span>
             <span className="text-[#3F3F46]">/</span>
@@ -539,7 +557,10 @@ export default function App() {
             )}
           </div>
 
-          <div className="flex items-center gap-2">
+          <div
+            style={desktopBridge ? NO_DRAG_STYLE : undefined}
+            className="flex items-center gap-2"
+          >
             {statusMessage && (
               <button
                 type="button"
@@ -589,14 +610,69 @@ export default function App() {
                   transport.mode === "local" ? "bg-[#22C55E]" : "bg-[#F59E0B]"
                 }`}
               />
-              {transport.mode === "local"
-                ? `LOCAL · ${(health?.database ?? "sqlite").toUpperCase()}`
-                : "DEMO STUDIO"}
+              {desktopBridge
+                ? "DESKTOP · NATIVE"
+                : transport.mode === "local"
+                  ? `LOCAL · ${(health?.database ?? "sqlite").toUpperCase()}`
+                  : "DEMO STUDIO"}
             </span>
+
+            {desktopBridge && (
+              <div className="ml-1 flex items-center border-l border-[#222228] pl-1">
+                <button
+                  type="button"
+                  aria-label="Minimize window"
+                  onClick={() => desktopBridge.minimizeWindow?.()}
+                  className="flex h-7 w-8 items-center justify-center rounded text-[#A1A1AA] hover:bg-[#1C1C22] hover:text-white"
+                >
+                  <Minus className="h-3.5 w-3.5" />
+                </button>
+                <button
+                  type="button"
+                  aria-label="Maximize window"
+                  onClick={() => desktopBridge.toggleMaximizeWindow?.()}
+                  className="flex h-7 w-8 items-center justify-center rounded text-[#A1A1AA] hover:bg-[#1C1C22] hover:text-white"
+                >
+                  <CornersOut className="h-3.5 w-3.5" />
+                </button>
+                <button
+                  type="button"
+                  aria-label="Close window"
+                  onClick={() => desktopBridge.closeWindow?.()}
+                  className="flex h-7 w-8 items-center justify-center rounded text-[#A1A1AA] hover:bg-[#EF4444] hover:text-white"
+                >
+                  <X className="h-3.5 w-3.5" />
+                </button>
+              </div>
+            )}
           </div>
         </header>
 
         <main className="min-h-0 flex-1 overflow-hidden">
+          {activeTab === "home" && (
+            <HomeHubPage
+              transport={transport}
+              projects={projects}
+              activeProjectId={activeProjectId}
+              selectedProfileId={selectedProfileId}
+              storage={storage}
+              activeProvider={modelRouting.active_provider}
+              editorModel={modelRouting.editor_model}
+              runningJobsCount={runningJobsCount}
+              onOpenProject={(id) => void handleOpenProject(id)}
+              onNavigateTab={(tab) => setActiveTab(tab)}
+              onProjectCreated={async (projectId) => {
+                await refreshWorkspace(transport);
+                await handleOpenProject(projectId);
+              }}
+              onRefreshAll={async () => {
+                await refreshWorkspace(transport);
+              }}
+              onExportProject={handleExportProjectById}
+              onStatusMessage={setStatusMessage}
+            />
+          )}
+
           {activeTab === "dashboard" && (
             <DashboardPage
               transport={transport}
@@ -633,6 +709,7 @@ export default function App() {
           {activeTab === "editor" && (
             <EditorStudioPage
               transport={transport}
+              sources={sources}
               projects={projects}
               bgmAssets={bgmAssets}
               activeProjectId={activeProjectId}
@@ -643,6 +720,9 @@ export default function App() {
               initialBoundaries={editorBoundaries}
               onSelectProject={(id) => void handleOpenProject(id)}
               onUpdateProjectStatus={handleUpdateProjectStatus}
+              onRefreshWorkspace={async () => {
+                await refreshWorkspace(transport);
+              }}
               onRefreshBgm={async () => {
                 const updated = await transport.listBgm();
                 setBgmAssets(updated);

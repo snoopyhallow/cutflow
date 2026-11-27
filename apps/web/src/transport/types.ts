@@ -211,6 +211,38 @@ export interface BgmAssetItem {
   builtin: boolean;
 }
 
+export interface SfxAssetItem {
+  id: string;
+  name: string;
+  durationMs: number;
+  sizeBytes: number;
+}
+
+export interface LocalPathImportOptions {
+  profileId?: string;
+  autoClip?: boolean;
+  title?: string;
+}
+
+export interface BlankProjectCreateInput {
+  title?: string;
+  ratio?: "9:16" | "4:5" | "1:1" | "16:9";
+  sourceId?: string;
+  localPath?: string;
+  profileId?: string;
+}
+
+export interface BlankProjectCreateResponse {
+  id: string;
+  jobId: string;
+  sourceId: string;
+  title: string;
+  totalDurationMs: number;
+  edl: TimelineProject;
+  createdAt: string;
+  updatedAt: string;
+}
+
 export interface IngestResult {
   source: SourceSummary;
   job: JobSummary | null;
@@ -271,11 +303,22 @@ export interface ExportRequestOptions {
   speedPreset?: "draft" | "final";
 }
 
+export interface CoEditorSelectionScope {
+  selectedClipId?: string | null;
+  selectedOverlayId?: string | null;
+  selectedWordId?: string | null;
+  inPointMs?: number | null;
+  outPointMs?: number | null;
+}
+
 export interface CoEditorRequest {
   instruction: string;
   boundaries?: string;
   playheadMs?: number;
   saveBoundaries?: boolean;
+  selection?: CoEditorSelectionScope;
+  provider?: string;
+  model?: string;
 }
 
 export interface CoEditorResponse {
@@ -285,8 +328,28 @@ export interface CoEditorResponse {
   ops: Record<string, unknown>[];
   reply: string;
   provider: string;
+  modelUsed?: string;
+  llmWarning?: string | null;
   boundaries: string;
   totalDurationMs: number;
+}
+
+export interface TranscribeProjectResponse {
+  edl: TimelineProject;
+  previousEdl: TimelineProject;
+  wordCount: number;
+  provider: string;
+  language: string;
+  totalDurationMs: number;
+}
+
+export interface AiModelsResponse {
+  activeProvider: string;
+  scanModel: string;
+  editorModel: string;
+  keysPresent: Record<string, boolean>;
+  ollamaOnline: boolean;
+  modelsByProvider: Record<string, string[]>;
 }
 
 export type ClipStatus = "draft" | "approved" | "exported" | "posted" | "archived";
@@ -344,6 +407,11 @@ export interface StudioTransport {
     profileId?: string,
     subtitleFile?: File | null,
   ): Promise<IngestResult>;
+  importLocalPath(
+    localPath: string,
+    opts?: LocalPathImportOptions,
+  ): Promise<IngestResult>;
+  sourceMediaUrl(sourceId: string): string | null;
   probeUrl(url: string): Promise<UrlProbeResponse>;
   ingestUrl(
     url: string,
@@ -360,6 +428,13 @@ export interface StudioTransport {
     onEvent: (evt: JobProgressEvent) => void,
   ): () => void;
   listProjects(jobId?: string): Promise<ClipProjectSummary[]>;
+  createBlankProject(input?: BlankProjectCreateInput): Promise<BlankProjectCreateResponse>;
+  renameProject(
+    projectId: string,
+    patch: { title?: string; status?: ClipStatus },
+  ): Promise<ClipProjectSummary>;
+  duplicateProject(projectId: string): Promise<ClipProjectSummary>;
+  deleteProject(projectId: string): Promise<void>;
   createMashup(input: MashupCreateInput): Promise<MashupCreateResponse>;
   getTimeline(projectId: string): Promise<TimelineResponse>;
   saveTimeline(projectId: string, edl: TimelineProject): Promise<TimelineResponse>;
@@ -371,6 +446,8 @@ export interface StudioTransport {
   uploadBgm(file: File, name?: string, mood?: string): Promise<BgmAssetItem>;
   bgmMediaUrl(assetId: string): string | null;
   deleteBgm(assetId: string): Promise<void>;
+  listSfx(): Promise<SfxAssetItem[]>;
+  sfxMediaUrl(sfxId: string): string | null;
   exportProject(
     projectId: string,
     opts?: ExportRequestOptions,
@@ -379,6 +456,11 @@ export interface StudioTransport {
     projectId: string,
     req: CoEditorRequest,
   ): Promise<CoEditorResponse>;
+  transcribeProject(
+    projectId: string,
+    language?: string,
+  ): Promise<TranscribeProjectResponse>;
+  listAiModels(): Promise<AiModelsResponse>;
   updateProjectStatus(
     projectId: string,
     status: ClipStatus,

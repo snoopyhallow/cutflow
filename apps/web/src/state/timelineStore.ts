@@ -1,18 +1,32 @@
 import { produce } from "immer";
 import { create } from "zustand";
 import {
+  addAudioClipItem,
+  addBRollClip,
   applyBladeCut,
   autoTightenSilence,
   cloneEdl,
+  deleteClip,
   deleteWord,
+  detachClipAudio,
+  duplicateClip,
+  freezeFrameAt,
   getActiveFramingAt,
   getTotalDurationMs,
   insertWord,
+  nextEdlId,
+  setClipSpeed,
+  splitClipAt,
   splitFramingSegment,
+  syncFramingToDuration,
+  trimClipEdges,
   updateWordTiming,
+  type AudioClipItem,
   type AudioTrack,
   type BgmTrack,
+  type BRollClip,
   type FramingSegment,
+  type NormalizedBox,
   type OverlayItem,
   type TimelineProject,
   type VideoSlice,
@@ -29,6 +43,8 @@ export interface AiPatchBanner {
 }
 
 export type InspectorContext = "framing" | "audio" | "subtitle" | "overlay" | "export";
+export type NleTool = "select" | "razor";
+export type RightDockTab = "inspector" | "coeditor";
 
 export interface TimelineStoreState {
   edl: TimelineProject | null;
@@ -39,11 +55,17 @@ export interface TimelineStoreState {
   isPlaying: boolean;
   playbackRate: number;
   snapToWaveform: boolean;
+  activeTool: NleTool;
+  rippleMode: boolean;
+  rightDockTab: RightDockTab;
+  aiSelectionPromptLabel: string | null;
   inPointMs: number | null;
   outPointMs: number | null;
   selectedWordId: string | null;
   selectedOverlayId: string | null;
   selectedClipId: string | null;
+  selectedBrollId: string | null;
+  selectedAudioClipId: string | null;
   inspectorContext: InspectorContext;
   zoomPxPerSec: number;
   dirty: boolean;
@@ -56,12 +78,19 @@ export interface TimelineStoreState {
   togglePlayback: () => void;
   setPlaybackRate: (rate: number) => void;
   toggleSnapToWaveform: () => void;
+  setActiveTool: (tool: NleTool) => void;
+  toggleRippleMode: () => void;
+  setRightDockTab: (tab: RightDockTab) => void;
+  askAiOnSelection: (label: string) => void;
+  clearAiSelectionPrompt: () => void;
   setInPointMs: (ms: number | null) => void;
   setOutPointMs: (ms: number | null) => void;
   clearInOut: () => void;
   selectWord: (wordId: string | null) => void;
   selectOverlay: (overlayId: string | null) => void;
   selectClip: (clipId: string | null) => void;
+  selectBroll: (brollId: string | null) => void;
+  selectAudioClip: (audioClipId: string | null) => void;
   setInspectorContext: (ctx: InspectorContext) => void;
   setZoomPxPerSec: (pxPerSec: number) => void;
   markSaved: () => void;
@@ -72,6 +101,37 @@ export interface TimelineStoreState {
 
   /** High-level NLE commands. */
   bladeCut: (cutStartMs: number, cutEndMs: number) => void;
+  splitClipAtPlayhead: (atMs?: number) => void;
+  removeClip: (clipId: string, ripple?: boolean) => void;
+  duplicateSelectedClip: (clipId?: string) => void;
+  trimClip: (
+    clipId: string,
+    opts: {
+      sourceStartMs?: number;
+      sourceEndMs?: number;
+      timelineStartMs?: number | null;
+    },
+  ) => void;
+  updateClipProps: (
+    clipId: string,
+    patch: Partial<
+      Pick<
+        VideoSlice,
+        | "speed"
+        | "reverse"
+        | "gainDb"
+        | "muted"
+        | "fadeInMs"
+        | "fadeOutMs"
+        | "label"
+        | "timelineStartMs"
+      >
+    >,
+  ) => void;
+  insertFreezeFrame: (atMs?: number, durationMs?: number) => void;
+  detachAudioFromClip: (clipId?: string) => void;
+  deleteActiveSelection: (forceRipple?: boolean) => boolean;
+
   setWordTiming: (
     wordId: string,
     startMs: number,
@@ -93,6 +153,7 @@ export interface TimelineStoreState {
         | "yOffsetRatio"
         | "xOffsetRatio"
         | "opacity"
+        | "scale"
         | "kind"
       >
     >,
@@ -103,7 +164,33 @@ export interface TimelineStoreState {
     startMs?: number,
     endMs?: number,
   ) => void;
+  duplicateOverlay: (overlayId: string) => void;
   removeOverlay: (overlayId: string) => void;
+
+  addBroll: (opts: {
+    sourceId: string;
+    sourceStartMs?: number;
+    sourceEndMs?: number;
+    timelineStartMs?: number;
+    label?: string;
+    box?: NormalizedBox;
+  }) => void;
+  updateBroll: (brollId: string, patch: Partial<BRollClip>) => void;
+  removeBroll: (brollId: string) => void;
+
+  addAudioClip: (opts: {
+    kind?: "detached" | "sfx" | "audio";
+    assetId?: string | null;
+    sourceId?: string | null;
+    label?: string;
+    sourceStartMs?: number;
+    sourceEndMs?: number;
+    timelineStartMs?: number;
+    gainDb?: number;
+  }) => void;
+  updateAudioClip: (audioClipId: string, patch: Partial<AudioClipItem>) => void;
+  removeAudioClip: (audioClipId: string) => void;
+
   updateFraming: (
     patch: Partial<
       Pick<
@@ -155,11 +242,17 @@ export const useTimelineStore = create<TimelineStoreState>((set, get) => ({
   isPlaying: false,
   playbackRate: 1,
   snapToWaveform: true,
+  activeTool: "select",
+  rippleMode: true,
+  rightDockTab: "inspector",
+  aiSelectionPromptLabel: null,
   inPointMs: null,
   outPointMs: null,
   selectedWordId: null,
   selectedOverlayId: null,
   selectedClipId: null,
+  selectedBrollId: null,
+  selectedAudioClipId: null,
   inspectorContext: "framing",
   zoomPxPerSec: 130,
   dirty: false,
@@ -175,11 +268,15 @@ export const useTimelineStore = create<TimelineStoreState>((set, get) => ({
       playheadMs: 0,
       isPlaying: false,
       playbackRate: 1,
+      activeTool: "select",
+      aiSelectionPromptLabel: null,
       inPointMs: null,
       outPointMs: null,
       selectedWordId: null,
       selectedOverlayId: null,
       selectedClipId: edl.tracks.video.clips[0]?.id ?? null,
+      selectedBrollId: null,
+      selectedAudioClipId: null,
       inspectorContext: "framing",
       dirty: false,
       lastActionLabel: null,
@@ -214,6 +311,26 @@ export const useTimelineStore = create<TimelineStoreState>((set, get) => ({
     set((s) => ({ snapToWaveform: !s.snapToWaveform }));
   },
 
+  setActiveTool(tool) {
+    set({ activeTool: tool });
+  },
+
+  toggleRippleMode() {
+    set((s) => ({ rippleMode: !s.rippleMode }));
+  },
+
+  setRightDockTab(tab) {
+    set({ rightDockTab: tab });
+  },
+
+  askAiOnSelection(label) {
+    set({ aiSelectionPromptLabel: label, rightDockTab: "coeditor" });
+  },
+
+  clearAiSelectionPrompt() {
+    set({ aiSelectionPromptLabel: null });
+  },
+
   setInPointMs(ms) {
     set({ inPointMs: ms === null ? null : Math.max(0, Math.round(ms)) });
   },
@@ -230,6 +347,8 @@ export const useTimelineStore = create<TimelineStoreState>((set, get) => ({
     set({
       selectedWordId: wordId,
       selectedOverlayId: wordId ? null : get().selectedOverlayId,
+      selectedBrollId: wordId ? null : get().selectedBrollId,
+      selectedAudioClipId: wordId ? null : get().selectedAudioClipId,
       inspectorContext: wordId ? "subtitle" : get().inspectorContext,
     });
   },
@@ -238,6 +357,8 @@ export const useTimelineStore = create<TimelineStoreState>((set, get) => ({
     set({
       selectedOverlayId: overlayId,
       selectedWordId: overlayId ? null : get().selectedWordId,
+      selectedBrollId: overlayId ? null : get().selectedBrollId,
+      selectedAudioClipId: overlayId ? null : get().selectedAudioClipId,
       inspectorContext: overlayId ? "overlay" : get().inspectorContext,
     });
   },
@@ -245,12 +366,36 @@ export const useTimelineStore = create<TimelineStoreState>((set, get) => ({
   selectClip(clipId) {
     set({
       selectedClipId: clipId,
+      selectedOverlayId: clipId ? null : get().selectedOverlayId,
+      selectedWordId: clipId ? null : get().selectedWordId,
+      selectedBrollId: clipId ? null : get().selectedBrollId,
+      selectedAudioClipId: clipId ? null : get().selectedAudioClipId,
       inspectorContext: clipId ? "framing" : get().inspectorContext,
     });
   },
 
+  selectBroll(brollId) {
+    set({
+      selectedBrollId: brollId,
+      selectedOverlayId: brollId ? null : get().selectedOverlayId,
+      selectedWordId: brollId ? null : get().selectedWordId,
+      selectedAudioClipId: brollId ? null : get().selectedAudioClipId,
+      inspectorContext: brollId ? "framing" : get().inspectorContext,
+    });
+  },
+
+  selectAudioClip(audioClipId) {
+    set({
+      selectedAudioClipId: audioClipId,
+      selectedOverlayId: audioClipId ? null : get().selectedOverlayId,
+      selectedWordId: audioClipId ? null : get().selectedWordId,
+      selectedBrollId: audioClipId ? null : get().selectedBrollId,
+      inspectorContext: audioClipId ? "audio" : get().inspectorContext,
+    });
+  },
+
   setInspectorContext(ctx) {
-    set({ inspectorContext: ctx });
+    set({ inspectorContext: ctx, rightDockTab: "inspector" });
   },
 
   setZoomPxPerSec(pxPerSec) {
@@ -295,6 +440,123 @@ export const useTimelineStore = create<TimelineStoreState>((set, get) => ({
       nextEdl,
     );
     set({ inPointMs: null, outPointMs: null });
+  },
+
+  splitClipAtPlayhead(atMs) {
+    const current = get().edl;
+    if (!current) return;
+    const targetMs = atMs ?? get().playheadMs;
+    const nextEdl = splitClipAt(current, targetMs);
+    get().commitEdl(`Split clip at ${(targetMs / 1000).toFixed(2)}s`, nextEdl);
+  },
+
+  removeClip(clipId, ripple) {
+    const current = get().edl;
+    if (!current) return;
+    const useRipple = ripple ?? get().rippleMode;
+    const nextEdl = deleteClip(current, clipId, useRipple);
+    get().commitEdl(useRipple ? "Ripple delete clip" : "Delete clip (gap)", nextEdl);
+    set({
+      selectedClipId: nextEdl.tracks.video.clips[0]?.id ?? null,
+    });
+  },
+
+  duplicateSelectedClip(clipId) {
+    const current = get().edl;
+    if (!current) return;
+    const targetId = clipId ?? get().selectedClipId ?? current.tracks.video.clips[0]?.id;
+    if (!targetId) return;
+    const nextEdl = duplicateClip(current, targetId);
+    get().commitEdl("Duplicate clip", nextEdl);
+  },
+
+  trimClip(clipId, opts) {
+    const current = get().edl;
+    if (!current) return;
+    const nextEdl = trimClipEdges(current, clipId, opts);
+    get().commitEdl("Trim clip", nextEdl);
+  },
+
+  updateClipProps(clipId, patch) {
+    const current = get().edl;
+    if (!current) return;
+    if (patch.speed !== undefined || patch.reverse !== undefined) {
+      const target = current.tracks.video.clips.find((c) => c.id === clipId);
+      if (!target) return;
+      let nextEdl = setClipSpeed(
+        current,
+        clipId,
+        patch.speed ?? target.speed ?? 1,
+        patch.reverse,
+      );
+      nextEdl = produce(nextEdl, (draft) => {
+        const c = draft.tracks.video.clips.find((x) => x.id === clipId);
+        if (!c) return;
+        if (patch.gainDb !== undefined) c.gainDb = patch.gainDb;
+        if (patch.muted !== undefined) c.muted = patch.muted;
+        if (patch.fadeInMs !== undefined) c.fadeInMs = patch.fadeInMs;
+        if (patch.fadeOutMs !== undefined) c.fadeOutMs = patch.fadeOutMs;
+        if (patch.label !== undefined) c.label = patch.label;
+      });
+      get().commitEdl(`Update clip speed`, nextEdl);
+      return;
+    }
+    get().mutateEdl("Update clip properties", (draft) => {
+      const c = draft.tracks.video.clips.find((x) => x.id === clipId);
+      if (!c) return;
+      if (patch.gainDb !== undefined) c.gainDb = patch.gainDb;
+      if (patch.muted !== undefined) c.muted = patch.muted;
+      if (patch.fadeInMs !== undefined) c.fadeInMs = patch.fadeInMs;
+      if (patch.fadeOutMs !== undefined) c.fadeOutMs = patch.fadeOutMs;
+      if (patch.label !== undefined) c.label = patch.label;
+      if (patch.timelineStartMs !== undefined) {
+        c.timelineStartMs = patch.timelineStartMs;
+        syncFramingToDuration(draft);
+      }
+    });
+  },
+
+  insertFreezeFrame(atMs, durationMs = 2000) {
+    const current = get().edl;
+    if (!current) return;
+    const targetMs = atMs ?? get().playheadMs;
+    const nextEdl = freezeFrameAt(current, targetMs, durationMs);
+    get().commitEdl(`Freeze frame (${(durationMs / 1000).toFixed(1)}s)`, nextEdl);
+  },
+
+  detachAudioFromClip(clipId) {
+    const current = get().edl;
+    if (!current) return;
+    const targetId = clipId ?? get().selectedClipId ?? current.tracks.video.clips[0]?.id;
+    if (!targetId) return;
+    const nextEdl = detachClipAudio(current, targetId);
+    get().commitEdl("Detach clip audio", nextEdl);
+  },
+
+  deleteActiveSelection(forceRipple) {
+    const state = get();
+    if (!state.edl) return false;
+    if (state.selectedOverlayId) {
+      state.removeOverlay(state.selectedOverlayId);
+      return true;
+    }
+    if (state.selectedWordId) {
+      state.removeWord(state.selectedWordId);
+      return true;
+    }
+    if (state.selectedBrollId) {
+      state.removeBroll(state.selectedBrollId);
+      return true;
+    }
+    if (state.selectedAudioClipId) {
+      state.removeAudioClip(state.selectedAudioClipId);
+      return true;
+    }
+    if (state.selectedClipId && state.edl.tracks.video.clips.length > 1) {
+      state.removeClip(state.selectedClipId, forceRipple ?? state.rippleMode);
+      return true;
+    }
+    return false;
   },
 
   setWordTiming(wordId, startMs, endMs, rollingAdjacent = true) {
@@ -353,6 +615,9 @@ export const useTimelineStore = create<TimelineStoreState>((set, get) => ({
       if (patch.opacity !== undefined) {
         target.opacity = Math.max(0.1, Math.min(1.0, Number(patch.opacity.toFixed(2))));
       }
+      if (patch.scale !== undefined) {
+        target.scale = Math.max(0.4, Math.min(2.5, Number(patch.scale.toFixed(2))));
+      }
       if (patch.startMs !== undefined || patch.endMs !== undefined) {
         const nextS = Math.max(
           0,
@@ -372,7 +637,7 @@ export const useTimelineStore = create<TimelineStoreState>((set, get) => ({
     const current = get().edl;
     if (!current) return;
     const total = getTotalDurationMs(current);
-    const id = `ov_${Date.now().toString(36)}`;
+    const id = nextEdlId("ov");
     const defaultEnd =
       kind === "pov_top_bar"
         ? Math.min(total, 3600)
@@ -402,10 +667,27 @@ export const useTimelineStore = create<TimelineStoreState>((set, get) => ({
               : 0,
         xOffsetRatio: 0,
         opacity: kind === "watermark_tag" ? 0.78 : 1.0,
+        scale: 1.0,
         maxLines: kind === "cta_pill" || kind === "watermark_tag" || kind === "cinema_credit" ? 1 : 2,
       });
     });
     set({ selectedOverlayId: id, selectedWordId: null, inspectorContext: "overlay" });
+  },
+
+  duplicateOverlay(overlayId) {
+    const current = get().edl;
+    if (!current) return;
+    const newId = nextEdlId("ov");
+    get().mutateEdl("Duplicate overlay", (draft) => {
+      const orig = draft.tracks.overlays.find((o) => o.id === overlayId);
+      if (!orig) return;
+      draft.tracks.overlays.push({
+        ...orig,
+        id: newId,
+        yOffsetRatio: Math.max(-0.46, Math.min(0.46, orig.yOffsetRatio + 0.05)),
+      });
+    });
+    set({ selectedOverlayId: newId, inspectorContext: "overlay" });
   },
 
   removeOverlay(overlayId) {
@@ -414,6 +696,70 @@ export const useTimelineStore = create<TimelineStoreState>((set, get) => ({
     });
     if (get().selectedOverlayId === overlayId) {
       set({ selectedOverlayId: null });
+    }
+  },
+
+  addBroll(opts) {
+    const current = get().edl;
+    if (!current) return;
+    const nextEdl = addBRollClip(current, {
+      ...opts,
+      timelineStartMs: opts.timelineStartMs ?? get().playheadMs,
+    });
+    const added = nextEdl.tracks.video.broll?.[nextEdl.tracks.video.broll.length - 1];
+    get().commitEdl(`Add B-Roll '${opts.label ?? "B-Roll"}'`, nextEdl);
+    if (added) {
+      set({ selectedBrollId: added.id, inspectorContext: "framing" });
+    }
+  },
+
+  updateBroll(brollId, patch) {
+    get().mutateEdl("Update B-Roll clip", (draft) => {
+      const target = draft.tracks.video.broll?.find((b) => b.id === brollId);
+      if (!target) return;
+      Object.assign(target, patch);
+    });
+  },
+
+  removeBroll(brollId) {
+    get().mutateEdl("Remove B-Roll clip", (draft) => {
+      if (!draft.tracks.video.broll) return;
+      draft.tracks.video.broll = draft.tracks.video.broll.filter((b) => b.id !== brollId);
+    });
+    if (get().selectedBrollId === brollId) {
+      set({ selectedBrollId: null });
+    }
+  },
+
+  addAudioClip(opts) {
+    const current = get().edl;
+    if (!current) return;
+    const nextEdl = addAudioClipItem(current, {
+      ...opts,
+      timelineStartMs: opts.timelineStartMs ?? get().playheadMs,
+    });
+    const added = nextEdl.tracks.audio.clips?.[nextEdl.tracks.audio.clips.length - 1];
+    get().commitEdl(`Add ${opts.label ?? "Audio Clip"}`, nextEdl);
+    if (added) {
+      set({ selectedAudioClipId: added.id, inspectorContext: "audio" });
+    }
+  },
+
+  updateAudioClip(audioClipId, patch) {
+    get().mutateEdl("Update audio clip", (draft) => {
+      const target = draft.tracks.audio.clips?.find((a) => a.id === audioClipId);
+      if (!target) return;
+      Object.assign(target, patch);
+    });
+  },
+
+  removeAudioClip(audioClipId) {
+    get().mutateEdl("Remove audio clip", (draft) => {
+      if (!draft.tracks.audio.clips) return;
+      draft.tracks.audio.clips = draft.tracks.audio.clips.filter((a) => a.id !== audioClipId);
+    });
+    if (get().selectedAudioClipId === audioClipId) {
+      set({ selectedAudioClipId: null });
     }
   },
 
@@ -480,7 +826,7 @@ export const useTimelineStore = create<TimelineStoreState>((set, get) => ({
       if (patch.label !== undefined) target.label = patch.label;
       if (patch.transitionIn !== undefined) target.transitionIn = patch.transitionIn;
       if (patch.transitionDurationMs !== undefined) {
-        target.transitionDurationMs = Math.max(80, Math.min(1000, patch.transitionDurationMs));
+        target.transitionDurationMs = Math.max(80, Math.min(800, patch.transitionDurationMs));
       }
       if (patch.transitionSfx !== undefined) target.transitionSfx = patch.transitionSfx;
     });

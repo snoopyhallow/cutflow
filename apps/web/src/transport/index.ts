@@ -3,6 +3,7 @@ import { HttpTransport } from "./httpTransport";
 import type { StudioTransport } from "./types";
 
 export * from "./types";
+export * from "./desktopBridge";
 export { DemoTransport } from "./demoTransport";
 export { HttpTransport } from "./httpTransport";
 

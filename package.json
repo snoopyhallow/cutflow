@@ -1,0 +1,16 @@
+{
+  "name": "cutflow-monorepo",
+  "private": true,
+  "version": "1.0.0",
+  "description": "CutFlow Studio — Local-First Native Desktop Video NLE, AI Co-Editor & Highlight Pipeline",
+  "scripts": {
+    "dev:web": "npm --prefix apps/web run dev",
+    "build": "npm --prefix apps/web run build",
+    "build:demo": "npm --prefix apps/web run build:demo",
+    "typecheck": "npm --prefix apps/web run typecheck",
+    "test": "npm --prefix apps/web test",
+    "desktop": "npm --prefix apps/web run build && npm --prefix apps/desktop start",
+    "desktop:dev": "npm --prefix apps/desktop start",
+    "desktop:build": "npm --prefix apps/web run build && npm --prefix apps/desktop run pack"
+  }
+}

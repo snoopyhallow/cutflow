@@ -288,6 +288,8 @@ export function StudioStage({
   const auxAudioRef = useRef<HTMLAudioElement | null>(null);
   const stageBoxRef = useRef<HTMLDivElement | null>(null);
   const duckGainRef = useRef<number>(1.0);
+  const lastSegmentKeyRef = useRef<string>("");
+  const lastRenderedPlayheadRef = useRef<number>(0);
 
   const [muted, setMuted] = useState(false);
   const [editingCamCrop, setEditingCamCrop] = useState(false);
@@ -433,6 +435,14 @@ export function StudioStage({
     }
   }, [isPlaying]);
 
+  useEffect(() => {
+    lastSegmentKeyRef.current = "";
+    const v = videoRef.current;
+    if (v && mediaUrl) {
+      v.load();
+    }
+  }, [mediaUrl]);
+
   // 60fps playback ticker + WebAudio GainNode Mixer + V2 B-Roll + A1/A3 Audio
   useEffect(() => {
     if (!edl) return;
@@ -449,31 +459,212 @@ export function StudioStage({
       const currentEdl = state.edl;
       if (!currentEdl) return;
 
-      let nextMs = state.playheadMs;
       const total = getTotalDurationMs(currentEdl);
-      if (state.isPlaying) {
-        nextMs = state.playheadMs + dt * state.playbackRate;
-        if (nextMs >= total) {
-          nextMs = total;
-          state.setIsPlaying(false);
-        } else if (nextMs < 0) {
-          nextMs = 0;
-          state.setIsPlaying(false);
-        }
-        state.setPlayheadMs(nextMs);
-      }
+      const externalScrub =
+        Math.abs(state.playheadMs - lastRenderedPlayheadRef.current) > 45;
+      let nextMs = state.playheadMs;
 
       // 1. Sync V1 <video> + Live WebAudio Dialogue GainNode (-infinity dB .. +12 dB)
       const video = videoRef.current;
-      const pt = resolveTimelinePoint(currentEdl, nextMs);
+      let pt = resolveTimelinePoint(currentEdl, nextMs);
       const audCfg = currentEdl.tracks.audio;
       const isVoiceTrackMuted =
         muted || Boolean(audCfg.muteOriginal) || audCfg.gainDb <= -59.5;
 
+      let advancedByVideoClock = false;
       if (video && mediaUrl) {
+        let isFrozen = Boolean(
+          pt.clip?.freezeDurationMs && pt.clip.freezeDurationMs > 0,
+        );
+        let clipSpeed = pt.clip ? Math.max(0.25, pt.clip.speed ?? 1) : 1.0;
+        const segKey = pt.isGap
+          ? "gap"
+          : pt.isColdOpen
+            ? "cold_open"
+            : (pt.clip?.id ?? "v1");
+        const segmentChanged =
+          lastSegmentKeyRef.current !== "" && segKey !== lastSegmentKeyRef.current;
+        lastSegmentKeyRef.current = segKey;
+
+        const originOffset =
+          pt.clip?.sourceId && pt.clip.sourceId !== currentEdl.sourceId
+            ? 0
+            : state.sliceOriginMs;
+
+        if (video.readyState >= 1) {
+          const canDriveFromVideoClock =
+            state.isPlaying &&
+            state.playbackRate > 0 &&
+            !externalScrub &&
+            !segmentChanged &&
+            !isFrozen &&
+            !pt.isGap &&
+            !pt.clip?.reverse &&
+            !video.paused &&
+            !video.seeking;
+
+          if (canDriveFromVideoClock) {
+            const gainEntry = mediaGainNodeMap.get(video);
+            const rawLatency =
+              gainEntry && gainEntry.ctx.state === "running"
+                ? ((
+                    gainEntry.ctx as AudioContext & { outputLatency?: number }
+                  ).outputLatency ??
+                    gainEntry.ctx.baseLatency ??
+                    0)
+                : 0;
+            const latencySec = Math.max(0, Math.min(0.12, rawLatency));
+            const heardSourceMs =
+              Math.max(0, video.currentTime - latencySec) * 1000 + originOffset;
+
+            if (pt.isColdOpen) {
+              const co = currentEdl.tracks.video.coldOpen;
+              if (co) {
+                const relCo = heardSourceMs - co.sourceStartMs;
+                if (relCo >= co.durationMs - 12) {
+                  // Crossed end of cold-open teaser -> step into Scene 1 immediately!
+                  nextMs = Math.min(total, co.durationMs + 4);
+                  pt = resolveTimelinePoint(currentEdl, nextMs);
+                  isFrozen = Boolean(
+                    pt.clip?.freezeDurationMs && pt.clip.freezeDurationMs > 0,
+                  );
+                  clipSpeed = pt.clip ? Math.max(0.25, pt.clip.speed ?? 1) : 1.0;
+                  lastSegmentKeyRef.current = pt.isGap
+                    ? "gap"
+                    : (pt.clip?.id ?? "v1");
+                  const nextOrigin =
+                    pt.clip?.sourceId && pt.clip.sourceId !== currentEdl.sourceId
+                      ? 0
+                      : state.sliceOriginMs;
+                  try {
+                    video.currentTime = Math.max(
+                      0,
+                      (pt.sourceMs - nextOrigin) / 1000,
+                    );
+                  } catch {
+                    // ignore seek while buffering
+                  }
+                  advancedByVideoClock = true;
+                } else if (relCo >= -60) {
+                  nextMs = Math.max(0, Math.min(co.durationMs, relCo));
+                  advancedByVideoClock = true;
+                }
+              }
+            } else if (pt.clip) {
+              const spanStartMs = nextMs - pt.clipElapsedMs;
+              const spanEndMs = spanStartMs + pt.clipDurationMs;
+              const relTlMs =
+                (heardSourceMs - pt.clip.sourceStartMs) / clipSpeed;
+              if (relTlMs >= pt.clipDurationMs - 12) {
+                if (spanEndMs >= total - 12) {
+                  nextMs = total;
+                  state.setIsPlaying(false);
+                } else {
+                  nextMs = Math.min(total, spanEndMs + 4);
+                  pt = resolveTimelinePoint(currentEdl, nextMs);
+                  isFrozen = Boolean(
+                    pt.clip?.freezeDurationMs && pt.clip.freezeDurationMs > 0,
+                  );
+                  clipSpeed = pt.clip ? Math.max(0.25, pt.clip.speed ?? 1) : 1.0;
+                  lastSegmentKeyRef.current = pt.isGap
+                    ? "gap"
+                    : (pt.clip?.id ?? "v1");
+                  const nextOrigin =
+                    pt.clip?.sourceId && pt.clip.sourceId !== currentEdl.sourceId
+                      ? 0
+                      : state.sliceOriginMs;
+                  try {
+                    video.currentTime = Math.max(
+                      0,
+                      (pt.sourceMs - nextOrigin) / 1000,
+                    );
+                  } catch {
+                    // ignore seek while buffering
+                  }
+                }
+                advancedByVideoClock = true;
+              } else if (relTlMs >= -80 && relTlMs <= pt.clipDurationMs + 80) {
+                nextMs = Math.max(spanStartMs, Math.min(spanEndMs, spanStartMs + relTlMs));
+                advancedByVideoClock = true;
+              }
+            }
+          }
+
+          if (!advancedByVideoClock) {
+            if (state.isPlaying) {
+              nextMs = state.playheadMs + dt * state.playbackRate;
+              if (nextMs >= total) {
+                nextMs = total;
+                state.setIsPlaying(false);
+              } else if (nextMs < 0) {
+                nextMs = 0;
+                state.setIsPlaying(false);
+              }
+              pt = resolveTimelinePoint(currentEdl, nextMs);
+              isFrozen = Boolean(
+                pt.clip?.freezeDurationMs && pt.clip.freezeDurationMs > 0,
+              );
+              clipSpeed = pt.clip ? Math.max(0.25, pt.clip.speed ?? 1) : 1.0;
+              lastSegmentKeyRef.current = pt.isGap
+                ? "gap"
+                : pt.isColdOpen
+                  ? "cold_open"
+                  : (pt.clip?.id ?? "v1");
+            }
+            const curOrigin =
+              pt.clip?.sourceId && pt.clip.sourceId !== currentEdl.sourceId
+                ? 0
+                : state.sliceOriginMs;
+            const expectedSec = Math.max(0, (pt.sourceMs - curOrigin) / 1000);
+            const drift = Math.abs(video.currentTime - expectedSec);
+            if (
+              segmentChanged ||
+              externalScrub ||
+              !state.isPlaying ||
+              isFrozen ||
+              pt.isGap ||
+              Boolean(pt.clip?.reverse) ||
+              drift > 0.12
+            ) {
+              if (segmentChanged || externalScrub || drift > 0.025) {
+                try {
+                  video.currentTime = expectedSec;
+                } catch {
+                  // ignore seek while buffering
+                }
+              }
+            }
+          }
+
+          if (
+            state.isPlaying &&
+            nextMs < total &&
+            state.playbackRate > 0 &&
+            !isFrozen &&
+            !pt.isGap &&
+            !pt.clip?.reverse
+          ) {
+            const targetRate = Math.max(
+              0.25,
+              Math.min(4, state.playbackRate * clipSpeed),
+            );
+            if (Math.abs(video.playbackRate - targetRate) > 0.01) {
+              video.playbackRate = targetRate;
+            }
+            if (video.paused) {
+              void video.play().catch(() => undefined);
+            }
+          } else if (!video.paused) {
+            video.pause();
+          }
+        } else if (state.isPlaying) {
+          nextMs = Math.max(0, Math.min(total, state.playheadMs + dt * state.playbackRate));
+          if (nextMs >= total || nextMs <= 0) state.setIsPlaying(false);
+          pt = resolveTimelinePoint(currentEdl, nextMs);
+        }
+
+        // Apply live WebAudio Dialogue GainNode envelope at resolved timeline point
         let clipLinear = 1.0;
-        let clipSpeed = 1.0;
-        let isFrozen = false;
         if (pt.isGap) {
           clipLinear = 0;
         } else if (pt.isColdOpen) {
@@ -485,8 +676,6 @@ export function StudioStage({
             );
           }
         } else if (pt.clip) {
-          isFrozen = Boolean(pt.clip.freezeDurationMs && pt.clip.freezeDurationMs > 0);
-          clipSpeed = Math.max(0.25, pt.clip.speed ?? 1);
           if (
             isFrozen ||
             pt.clip.muted ||
@@ -509,53 +698,26 @@ export function StudioStage({
             }
           }
         }
-
         const totalVoiceLinear = isVoiceTrackMuted
           ? 0
           : dbToLinearGain(audCfg.gainDb) * clipLinear;
         applyLiveElementGain(video, totalVoiceLinear);
-
-        const originOffset =
-          pt.clip?.sourceId && pt.clip.sourceId !== currentEdl.sourceId
-            ? 0
-            : state.sliceOriginMs;
-        const expectedSec = Math.max(0, (pt.sourceMs - originOffset) / 1000);
-        if (video.readyState >= 1) {
-          const drift = Math.abs(video.currentTime - expectedSec);
-          if (
-            !state.isPlaying ||
-            isFrozen ||
-            pt.isGap ||
-            Boolean(pt.clip?.reverse) ||
-            drift > 0.2
-          ) {
-            if (drift > 0.03) {
-              try {
-                video.currentTime = expectedSec;
-              } catch {
-                // ignore seek while buffering
-              }
-            }
-          }
-          if (
-            state.isPlaying &&
-            state.playbackRate > 0 &&
-            !isFrozen &&
-            !pt.isGap &&
-            !pt.clip?.reverse
-          ) {
-            video.playbackRate = Math.max(
-              0.25,
-              Math.min(4, state.playbackRate * clipSpeed),
-            );
-            if (video.paused) {
-              void video.play().catch(() => undefined);
-            }
-          } else if (!video.paused) {
-            video.pause();
-          }
+      } else if (state.isPlaying) {
+        nextMs = state.playheadMs + dt * state.playbackRate;
+        if (nextMs >= total) {
+          nextMs = total;
+          state.setIsPlaying(false);
+        } else if (nextMs < 0) {
+          nextMs = 0;
+          state.setIsPlaying(false);
         }
+        pt = resolveTimelinePoint(currentEdl, nextMs);
       }
+
+      if (Math.round(nextMs) !== state.playheadMs) {
+        state.setPlayheadMs(nextMs);
+      }
+      lastRenderedPlayheadRef.current = Math.round(nextMs);
 
       // 2. Sync V2 B-Roll <video>
       const brEl = brollVideoRef.current;
@@ -692,9 +854,12 @@ export function StudioStage({
             !pt.isGap &&
             peaks?.rms?.length
           ) {
+            const peakOffsetMs =
+              peaks.durationMs < total - 200 ? coldOpenMs : 0;
+            const sampleMs = Math.max(0, nextMs - peakOffsetMs);
             const idx = Math.min(
               peaks.rms.length - 1,
-              Math.max(0, Math.floor((nextMs / 1000) * peaks.rateHz)),
+              Math.max(0, Math.floor((sampleMs / 1000) * peaks.rateHz)),
             );
             const speechRms = peaks.rms[idx] ?? 0;
             targetDuck = speechRms > 0.14 ? 0.34 : 1.0;
@@ -923,27 +1088,99 @@ export function StudioStage({
     dragBrollBox,
   ]);
 
+  const subtitleGroups = useMemo(() => {
+    if (!edl || !edl.tracks.subtitles.enabled) return [];
+    const muteRanges = edl.tracks.subtitles.muteRanges ?? [];
+    const visible = edl.tracks.subtitles.words.filter((w) => {
+      const mid = (w.startMs + w.endMs) * 0.5;
+      return !muteRanges.some(([m0, m1]) => mid >= m0 && mid <= m1);
+    });
+    if (visible.length === 0) return [];
+
+    // Exact AutoClip / subtitles.py phrase grouping parity (pause, span, punctuation, word ceiling)
+    const preset = edl.tracks.subtitles.style.preset;
+    const maxWords = preset === "viral_punch_glow" ? 3 : 4;
+    const maxGapMs = preset === "cinema_neon_glow" ? 580 : 400;
+    const maxSpanMs = 2000;
+
+    const groups: (typeof visible)[] = [];
+    let cur: typeof visible = [];
+    for (let i = 0; i < visible.length; i += 1) {
+      const w = visible[i];
+      if (cur.length > 0) {
+        const gap = w.startMs - cur[cur.length - 1].endMs;
+        const span = w.endMs - cur[0].startMs;
+        if (gap > maxGapMs || cur.length >= maxWords || span > maxSpanMs) {
+          groups.push(cur);
+          cur = [];
+        }
+      }
+      cur.push(w);
+      const isLast = i === visible.length - 1;
+      const trimmed = w.text.trimEnd();
+      if (
+        !isLast &&
+        (trimmed.endsWith(".") ||
+          trimmed.endsWith("!") ||
+          trimmed.endsWith("?") ||
+          trimmed.endsWith("…"))
+      ) {
+        groups.push(cur);
+        cur = [];
+      }
+    }
+    if (cur.length > 0) groups.push(cur);
+    return groups;
+  }, [edl]);
+
   const subtitleRenderGroup = useMemo(() => {
-    if (!edl || !edl.tracks.subtitles.enabled) return { words: [], chunkIdx: 0 };
-    const words = edl.tracks.subtitles.words;
+    if (!edl || !edl.tracks.subtitles.enabled || subtitleGroups.length === 0) {
+      return { words: [], chunkIdx: 0, activeWordId: null as string | null };
+    }
     const mode = edl.tracks.subtitles.style.revealMode;
-    const activeIdx = words.findIndex(
-      (w) => playheadMs >= w.startMs && playheadMs <= w.endMs,
-    );
-    if (activeIdx === -1) return { words: [], chunkIdx: 0 };
     if (mode === "single_word") {
-      return { words: [words[activeIdx]], chunkIdx: activeIdx };
+      const all = subtitleGroups.flat();
+      const idx = all.findIndex(
+        (w) => playheadMs >= w.startMs && playheadMs <= w.endMs,
+      );
+      if (idx === -1) {
+        return { words: [], chunkIdx: 0, activeWordId: null as string | null };
+      }
+      return { words: [all[idx]], chunkIdx: idx, activeWordId: all[idx].id };
     }
-    const maxPerGroup =
-      edl.tracks.subtitles.style.preset === "cinema_neon_glow" ? 4 : 3;
-    const chunkIdx = Math.floor(activeIdx / maxPerGroup);
-    const chunkStart = chunkIdx * maxPerGroup;
-    const chunk = words.slice(chunkStart, chunkStart + maxPerGroup);
+
+    // Find the active group, holding across tiny intra-group consonant gaps just like ASS events!
+    const gIdx = subtitleGroups.findIndex((grp, idx) => {
+      const gStart = grp[0].startMs;
+      const rawEnd = grp[grp.length - 1].endMs;
+      const nextGroupStart =
+        idx + 1 < subtitleGroups.length ? subtitleGroups[idx + 1][0].startMs : Infinity;
+      const gEnd = Math.min(nextGroupStart, rawEnd);
+      return playheadMs >= gStart && playheadMs <= gEnd;
+    });
+    if (gIdx === -1) {
+      return { words: [], chunkIdx: 0, activeWordId: null as string | null };
+    }
+
+    const group = subtitleGroups[gIdx];
+    let activeInGroup = 0;
+    for (let i = 0; i < group.length; i += 1) {
+      if (playheadMs >= group[i].startMs) {
+        activeInGroup = i;
+      } else {
+        break;
+      }
+    }
+    const activeWordId = group[activeInGroup]?.id ?? null;
     if (mode === "progressive") {
-      return { words: chunk.filter((w) => playheadMs >= w.startMs), chunkIdx };
+      return {
+        words: group.slice(0, activeInGroup + 1),
+        chunkIdx: gIdx,
+        activeWordId,
+      };
     }
-    return { words: chunk, chunkIdx };
-  }, [edl, playheadMs]);
+    return { words: group, chunkIdx: gIdx, activeWordId };
+  }, [edl, subtitleGroups, playheadMs]);
 
   const visibleOverlays = useMemo(
     () =>
@@ -1812,8 +2049,7 @@ export function StudioStage({
                 }}
               >
                 {subtitleRenderGroup.words.map((w) => {
-                  const isCurrent =
-                    playheadMs >= w.startMs && playheadMs <= w.endMs;
+                  const isCurrent = subtitleRenderGroup.activeWordId === w.id;
                   const preset = subStyle.preset;
 
                   if (preset === "cinema_neon_glow") {

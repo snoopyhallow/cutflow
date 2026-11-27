@@ -8,11 +8,14 @@ import {
   getActiveFramingAt,
   getTotalDurationMs,
   insertWord,
+  setClipSpeed,
+  setColdOpen,
   snapToNearestOnsetMs,
   sourceToTimeline,
   splitFramingSegment,
   TimelineProjectSchema,
   timelineToSource,
+  trimClipEdges,
   updateWordTiming,
 } from "../edl";
 import { useTimelineStore } from "../state/timelineStore";
@@ -202,6 +205,53 @@ describe("TimelineMapper & non-destructive EDL operations", () => {
 
     // Source timestamps inside the deleted region no longer map to timeline
     expect(sourceToTimeline(cut, 14_000)).toBeNull();
+  });
+
+  it("keeps subtitle words locked to source audio across cold-open, trim, and speed edits", () => {
+    const edl = TimelineProjectSchema.parse(sampleEdlFixture);
+    const origSourceById = new Map(
+      edl.tracks.subtitles.words.map((w) => [
+        w.id,
+        timelineToSource(edl, w.startMs).sourceMs,
+      ]),
+    );
+
+    const noCo = setColdOpen(edl, { enabled: false });
+    expect(getTotalDurationMs(noCo)).toBe(20_000);
+    for (const w of noCo.tracks.subtitles.words) {
+      expect(timelineToSource(noCo, w.startMs)).toEqual({
+        isColdOpen: false,
+        sourceMs: origSourceById.get(w.id),
+      });
+    }
+
+    const reCo = setColdOpen(noCo, { enabled: true, durationMs: 2200 });
+    expect(getTotalDurationMs(reCo)).toBe(22_200);
+    for (const w of reCo.tracks.subtitles.words) {
+      expect(timelineToSource(reCo, w.startMs)).toEqual({
+        isColdOpen: false,
+        sourceMs: origSourceById.get(w.id),
+      });
+    }
+
+    const clipId = noCo.tracks.video.clips[0].id;
+    const trimmed = trimClipEdges(noCo, clipId, { sourceStartMs: 11_200 });
+    for (const w of trimmed.tracks.subtitles.words) {
+      const expectedSrc = origSourceById.get(w.id)!;
+      if (expectedSrc >= 11_200) {
+        expect(
+          Math.abs(timelineToSource(trimmed, w.startMs).sourceMs - expectedSrc),
+        ).toBeLessThanOrEqual(2);
+      }
+    }
+
+    const sped = setClipSpeed(noCo, clipId, 1.5);
+    for (const w of sped.tracks.subtitles.words) {
+      const expectedSrc = origSourceById.get(w.id)!;
+      expect(
+        Math.abs(timelineToSource(sped, w.startMs).sourceMs - expectedSrc),
+      ).toBeLessThanOrEqual(3);
+    }
   });
 
   it("performs Premiere-style rolling edit on adjacent words", () => {

@@ -16,9 +16,9 @@ import {
   insertWord,
   nextEdlId,
   setClipSpeed,
+  setColdOpen as applyColdOpenOp,
   splitClipAt,
   splitFramingSegment,
-  syncFramingToDuration,
   trimClipEdges,
   updateWordTiming,
   type AudioClipItem,
@@ -73,6 +73,13 @@ export interface TimelineStoreState {
   lastAiPatch: AiPatchBanner | null;
 
   loadProject: (edl: TimelineProject, sliceOriginMs?: number) => void;
+  setSliceOriginMs: (ms: number) => void;
+  setColdOpen: (opts: {
+    enabled: boolean;
+    sourceStartMs?: number;
+    durationMs?: number;
+    fadeOutMs?: number;
+  }) => void;
   setPlayheadMs: (ms: number) => void;
   setIsPlaying: (playing: boolean) => void;
   togglePlayback: () => void;
@@ -282,6 +289,24 @@ export const useTimelineStore = create<TimelineStoreState>((set, get) => ({
       lastActionLabel: null,
       lastAiPatch: null,
     });
+  },
+
+  setSliceOriginMs(ms) {
+    set({ sliceOriginMs: Math.max(0, Math.round(ms)) });
+  },
+
+  setColdOpen(opts) {
+    const current = get().edl;
+    if (!current) return;
+    const nextEdl = applyColdOpenOp(current, opts);
+    get().commitEdl(
+      opts.enabled
+        ? opts.durationMs !== undefined
+          ? "Adjust cold-open duration"
+          : "Enable cold open"
+        : "Disable cold open",
+      nextEdl,
+    );
   },
 
   setPlayheadMs(ms) {
@@ -501,6 +526,22 @@ export const useTimelineStore = create<TimelineStoreState>((set, get) => ({
       get().commitEdl(`Update clip speed`, nextEdl);
       return;
     }
+    if (patch.timelineStartMs !== undefined) {
+      let nextEdl = trimClipEdges(current, clipId, {
+        timelineStartMs: patch.timelineStartMs,
+      });
+      nextEdl = produce(nextEdl, (draft) => {
+        const c = draft.tracks.video.clips.find((x) => x.id === clipId);
+        if (!c) return;
+        if (patch.gainDb !== undefined) c.gainDb = patch.gainDb;
+        if (patch.muted !== undefined) c.muted = patch.muted;
+        if (patch.fadeInMs !== undefined) c.fadeInMs = patch.fadeInMs;
+        if (patch.fadeOutMs !== undefined) c.fadeOutMs = patch.fadeOutMs;
+        if (patch.label !== undefined) c.label = patch.label;
+      });
+      get().commitEdl("Move clip position", nextEdl);
+      return;
+    }
     get().mutateEdl("Update clip properties", (draft) => {
       const c = draft.tracks.video.clips.find((x) => x.id === clipId);
       if (!c) return;
@@ -509,10 +550,6 @@ export const useTimelineStore = create<TimelineStoreState>((set, get) => ({
       if (patch.fadeInMs !== undefined) c.fadeInMs = patch.fadeInMs;
       if (patch.fadeOutMs !== undefined) c.fadeOutMs = patch.fadeOutMs;
       if (patch.label !== undefined) c.label = patch.label;
-      if (patch.timelineStartMs !== undefined) {
-        c.timelineStartMs = patch.timelineStartMs;
-        syncFramingToDuration(draft);
-      }
     });
   },
 

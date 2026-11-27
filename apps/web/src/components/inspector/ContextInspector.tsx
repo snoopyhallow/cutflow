@@ -98,6 +98,7 @@ export function ContextInspector({
     selectBroll,
     selectAudioClip,
     mutateEdl,
+    setColdOpen,
     updateFraming,
     updateAudio,
     updateBgm,
@@ -515,24 +516,7 @@ export function ContextInspector({
                 label="Cold-Open Flash-Forward"
                 hint="Tease climax at 0:00 before Scene 1"
                 checked={Boolean(edl.tracks.video.coldOpen?.enabled)}
-                onChange={(enabled) => {
-                  mutateEdl(enabled ? "Enable cold open" : "Disable cold open", (draft) => {
-                    if (!enabled) {
-                      draft.tracks.video.coldOpen = null;
-                    } else {
-                      const clip = draft.tracks.video.clips[0];
-                      const srcMid = Math.round(
-                        clip.sourceStartMs + (clip.sourceEndMs - clip.sourceStartMs) * 0.6,
-                      );
-                      draft.tracks.video.coldOpen = {
-                        enabled: true,
-                        sourceStartMs: Math.max(0, srcMid),
-                        durationMs: 1500,
-                        fadeOutMs: 120,
-                      };
-                    }
-                  });
-                }}
+                onChange={(enabled) => setColdOpen({ enabled })}
               />
 
               {edl.tracks.video.coldOpen?.enabled && (
@@ -543,13 +527,7 @@ export function ContextInspector({
                   step={100}
                   value={edl.tracks.video.coldOpen.durationMs}
                   displayValue={`${(edl.tracks.video.coldOpen.durationMs / 1000).toFixed(2)}s`}
-                  onChange={(ms) => {
-                    mutateEdl("Adjust cold-open duration", (draft) => {
-                      if (draft.tracks.video.coldOpen) {
-                        draft.tracks.video.coldOpen.durationMs = ms;
-                      }
-                    });
-                  }}
+                  onChange={(ms) => setColdOpen({ enabled: true, durationMs: ms })}
                 />
               )}
             </div>

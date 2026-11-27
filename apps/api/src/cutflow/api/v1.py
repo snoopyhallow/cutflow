@@ -896,7 +896,11 @@ def get_project_media(project_id: str) -> FileResponse:
         try:
             safe = safe_resolve(Path(raw_path), paths.work_dir())
             if safe.is_file():
-                return FileResponse(safe, media_type="video/mp4")
+                return FileResponse(
+                    safe,
+                    media_type="video/mp4",
+                    headers={"Cache-Control": "no-cache"},
+                )
         except PathSandboxError as exc:
             raise HTTPException(status_code=403, detail=str(exc)) from exc
 
@@ -904,7 +908,11 @@ def get_project_media(project_id: str) -> FileResponse:
         src_file = Path(fallback_src_path)
         if src_file.is_file():
             mime, _ = mimetypes.guess_type(src_file.name)
-            return FileResponse(src_file, media_type=mime or "video/mp4")
+            return FileResponse(
+                src_file,
+                media_type=mime or "video/mp4",
+                headers={"Cache-Control": "no-cache"},
+            )
 
     raise HTTPException(status_code=404, detail="Clip slice media is not available.")
 
@@ -926,7 +934,7 @@ def get_project_thumb(project_id: str) -> FileResponse:
         raise HTTPException(status_code=403, detail=str(exc)) from exc
     if not safe.is_file():
         raise HTTPException(status_code=404, detail="Thumbnail image missing on disk.")
-    return FileResponse(safe, media_type="image/jpeg")
+    return FileResponse(safe, media_type="image/jpeg", headers={"Cache-Control": "no-cache"})
 
 
 @router.get("/projects/{project_id}/filmstrip")
@@ -946,7 +954,7 @@ def get_project_filmstrip(project_id: str) -> FileResponse:
         raise HTTPException(status_code=403, detail=str(exc)) from exc
     if not safe.is_file():
         raise HTTPException(status_code=404, detail="Filmstrip image missing on disk.")
-    return FileResponse(safe, media_type="image/jpeg")
+    return FileResponse(safe, media_type="image/jpeg", headers={"Cache-Control": "no-cache"})
 
 
 @router.get("/projects/{project_id}/peaks")

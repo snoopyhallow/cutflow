@@ -55,19 +55,25 @@ function resolveWebDistDir() {
   if (process.env.CUTFLOW_WEB_DIST && fs.existsSync(path.join(process.env.CUTFLOW_WEB_DIST, "index.html"))) {
     return path.resolve(process.env.CUTFLOW_WEB_DIST);
   }
+  const candidates = [];
   if (process.resourcesPath) {
     const bundled = path.join(process.resourcesPath, "web-dist");
-    if (fs.existsSync(path.join(bundled, "index.html"))) {
-      return bundled;
+    const bundledIdx = path.join(bundled, "index.html");
+    if (fs.existsSync(bundledIdx)) {
+      candidates.push({ dir: bundled, mtimeMs: fs.statSync(bundledIdx).mtimeMs });
     }
   }
   for (const root of candidateRoots()) {
     const candidate = path.join(root, "apps", "web", "dist");
-    if (fs.existsSync(path.join(candidate, "index.html"))) {
-      return candidate;
+    const idxFile = path.join(candidate, "index.html");
+    if (fs.existsSync(idxFile)) {
+      candidates.push({ dir: candidate, mtimeMs: fs.statSync(idxFile).mtimeMs });
+      break;
     }
   }
-  return "";
+  if (candidates.length === 0) return "";
+  candidates.sort((a, b) => b.mtimeMs - a.mtimeMs);
+  return candidates[0].dir;
 }
 
 function resolvePythonBackend() {

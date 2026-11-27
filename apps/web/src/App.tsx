@@ -409,8 +409,13 @@ export default function App() {
   const activeMediaUrl = useMemo(() => {
     if (!activeProjectId) return null;
     const summary = projects.find((p) => p.id === activeProjectId);
+    const cacheTag =
+      transport.mode === "local" && summary?.updatedAt
+        ? `?v=${encodeURIComponent(summary.updatedAt)}`
+        : "";
     if (summary?.hasSlice) {
-      return transport.projectMediaUrl(activeProjectId);
+      const base = transport.projectMediaUrl(activeProjectId);
+      return base ? `${base}${cacheTag}` : null;
     }
     if (transport.mode === "local") {
       const clipSourceId =
@@ -418,10 +423,10 @@ export default function App() {
         edl?.sourceId ||
         summary?.sourceId;
       if (clipSourceId) {
-        return (
+        const base =
           transport.sourceMediaUrl(clipSourceId) ??
-          transport.projectMediaUrl(activeProjectId)
-        );
+          transport.projectMediaUrl(activeProjectId);
+        return base ? `${base}${cacheTag}` : null;
       }
     }
     return null;
@@ -431,7 +436,12 @@ export default function App() {
     if (!activeProjectId) return null;
     const summary = projects.find((p) => p.id === activeProjectId);
     if (!summary?.hasFilmstrip) return null;
-    return transport.projectFilmstripUrl(activeProjectId);
+    const base = transport.projectFilmstripUrl(activeProjectId);
+    const cacheTag =
+      transport.mode === "local" && summary.updatedAt
+        ? `?v=${encodeURIComponent(summary.updatedAt)}`
+        : "";
+    return base ? `${base}${cacheTag}` : null;
   }, [activeProjectId, projects, transport]);
 
   const runningJobsCount = jobs.filter(

@@ -572,6 +572,268 @@ export function deleteClip(
   return next;
 }
 
+function remapTracksAfterClipEdit(
+  beforeEdl: TimelineProject,
+  nextEdl: TimelineProject,
+  editedIdx: number,
+): void {
+  const before = buildClipSpans(beforeEdl);
+  const after = buildClipSpans(nextEdl);
+  if (before.spans.length === 0 || before.spans.length !== after.spans.length) {
+    return;
+  }
+
+  const bodyStart = before.coldOpenMs;
+  const oldTotal = before.totalDurationMs;
+  const newTotal = after.totalDurationMs;
+
+  const remappedWords: SubtitleWord[] = [];
+  for (const w of nextEdl.tracks.subtitles.words) {
+    if (w.endMs <= bodyStart) {
+      const clampedE = Math.min(newTotal, w.endMs);
+      if (clampedE - w.startMs >= MIN_WORD_MS) {
+        remappedWords.push({ ...w, endMs: clampedE });
+      }
+      continue;
+    }
+
+    const mid = 0.5 * (w.startMs + w.endMs);
+    let spanIdx = before.spans.length - 1;
+    for (let k = 0; k < before.spans.length; k += 1) {
+      if (mid <= before.spans[k].tEnd) {
+        spanIdx = k;
+        break;
+      }
+    }
+
+    const bSpan = before.spans[spanIdx];
+    const aSpan = after.spans[spanIdx];
+    if (spanIdx !== editedIdx) {
+      const shift = aSpan.tStart - bSpan.tStart;
+      const ns = Math.max(0, w.startMs + shift);
+      const ne = Math.min(newTotal, w.endMs + shift);
+      if (ne - ns >= MIN_WORD_MS) {
+        remappedWords.push({ ...w, startMs: ns, endMs: ne });
+      }
+      continue;
+    }
+
+    const bClip = bSpan.clip;
+    const aClip = aSpan.clip;
+    if (
+      (bClip.freezeDurationMs && bClip.freezeDurationMs > 0) ||
+      (aClip.freezeDurationMs && aClip.freezeDurationMs > 0)
+    ) {
+      const ns = Math.max(
+        aSpan.tStart,
+        Math.min(aSpan.tEnd - MIN_WORD_MS, aSpan.tStart + (w.startMs - bSpan.tStart)),
+      );
+      const ne = Math.min(
+        aSpan.tEnd,
+        Math.max(ns + MIN_WORD_MS, aSpan.tStart + (w.endMs - bSpan.tStart)),
+      );
+      if (ne - ns >= MIN_WORD_MS) {
+        remappedWords.push({ ...w, startMs: ns, endMs: ne });
+      }
+      continue;
+    }
+
+    const bSpd = Math.max(0.25, bClip.speed ?? 1);
+    const aSpd = Math.max(0.25, aClip.speed ?? 1);
+    const relS = w.startMs - bSpan.tStart;
+    const relE = w.endMs - bSpan.tStart;
+    const srcLo = bClip.reverse
+      ? bClip.sourceEndMs - relE * bSpd
+      : bClip.sourceStartMs + relS * bSpd;
+    const srcHi = bClip.reverse
+      ? bClip.sourceEndMs - relS * bSpd
+      : bClip.sourceStartMs + relE * bSpd;
+
+    const cLo = Math.max(aClip.sourceStartMs, srcLo);
+    const cHi = Math.min(aClip.sourceEndMs, srcHi);
+    if ((cHi - cLo) / aSpd < MIN_WORD_MS) {
+      continue;
+    }
+
+    let ns = aClip.reverse
+      ? aSpan.tStart + Math.round((aClip.sourceEndMs - cHi) / aSpd)
+      : aSpan.tStart + Math.round((cLo - aClip.sourceStartMs) / aSpd);
+    let ne = aClip.reverse
+      ? aSpan.tStart + Math.round((aClip.sourceEndMs - cLo) / aSpd)
+      : aSpan.tStart + Math.round((cHi - aClip.sourceStartMs) / aSpd);
+
+    ns = Math.max(aSpan.tStart, Math.min(Math.max(aSpan.tStart, aSpan.tEnd - MIN_WORD_MS), ns));
+    ne = Math.min(aSpan.tEnd, Math.max(ns + MIN_WORD_MS, ne));
+    if (ne - ns >= MIN_WORD_MS) {
+      remappedWords.push({ ...w, startMs: ns, endMs: ne });
+    }
+  }
+
+  remappedWords.sort((a, b) =>
+    a.startMs !== b.startMs ? a.startMs - b.startMs : a.endMs - b.endMs,
+  );
+  nextEdl.tracks.subtitles.words = remappedWords;
+
+  const oldEditEnd = before.spans[editedIdx].tEnd;
+  const tailDelta = after.spans[editedIdx].tEnd - oldEditEnd;
+  if (tailDelta !== 0) {
+    if (nextEdl.tracks.video.broll) {
+      for (const br of nextEdl.tracks.video.broll) {
+        if (br.timelineStartMs >= oldEditEnd) {
+          br.timelineStartMs = Math.max(0, br.timelineStartMs + tailDelta);
+        }
+      }
+    }
+    if (nextEdl.tracks.audio.clips) {
+      for (const ac of nextEdl.tracks.audio.clips) {
+        if (ac.timelineStartMs >= oldEditEnd) {
+          ac.timelineStartMs = Math.max(0, ac.timelineStartMs + tailDelta);
+        }
+      }
+    }
+  }
+
+  const keptOverlays: OverlayItem[] = [];
+  for (const ov of nextEdl.tracks.overlays) {
+    if (ov.startMs === 0 && ov.endMs >= Math.max(250, oldTotal - 50)) {
+      keptOverlays.push({ ...ov, endMs: Math.max(250, newTotal) });
+    } else if (ov.startMs >= oldEditEnd && tailDelta !== 0) {
+      const ns = Math.max(0, ov.startMs + tailDelta);
+      const ne = Math.min(newTotal, ov.endMs + tailDelta);
+      if (ne - ns >= 150) {
+        keptOverlays.push({ ...ov, startMs: ns, endMs: ne });
+      }
+    } else {
+      const clampedEnd = Math.min(newTotal, ov.endMs);
+      if (clampedEnd > ov.startMs) {
+        keptOverlays.push({ ...ov, endMs: clampedEnd });
+      }
+    }
+  }
+  nextEdl.tracks.overlays = keptOverlays;
+}
+
+export function setColdOpen(
+  edl: TimelineProject,
+  opts: {
+    enabled: boolean;
+    sourceStartMs?: number;
+    durationMs?: number;
+    fadeOutMs?: number;
+  },
+): TimelineProject {
+  const before = buildClipSpans(edl);
+  const oldCo = before.coldOpenMs;
+  const oldTotal = before.totalDurationMs;
+  const next = cloneEdl(edl);
+  const prevBlock = edl.tracks.video.coldOpen;
+
+  let newCo = 0;
+  if (!opts.enabled) {
+    next.tracks.video.coldOpen = null;
+  } else {
+    const firstClip = next.tracks.video.clips[0];
+    const defaultSrc = Math.round(
+      firstClip.sourceStartMs + (firstClip.sourceEndMs - firstClip.sourceStartMs) * 0.6,
+    );
+    const resolvedSrc = Math.max(
+      0,
+      Math.round(opts.sourceStartMs ?? prevBlock?.sourceStartMs ?? defaultSrc),
+    );
+    const resolvedDur = Math.max(
+      500,
+      Math.min(4000, Math.round(opts.durationMs ?? prevBlock?.durationMs ?? 1500)),
+    );
+    const resolvedFade = Math.max(
+      0,
+      Math.min(1000, Math.round(opts.fadeOutMs ?? prevBlock?.fadeOutMs ?? 120)),
+    );
+    next.tracks.video.coldOpen = {
+      enabled: true,
+      sourceStartMs: resolvedSrc,
+      durationMs: resolvedDur,
+      fadeOutMs: resolvedFade,
+    };
+    newCo = resolvedDur;
+  }
+
+  const delta = newCo - oldCo;
+  if (delta === 0) {
+    syncFramingToDuration(next);
+    return next;
+  }
+
+  for (const clip of next.tracks.video.clips) {
+    if (clip.timelineStartMs !== undefined && clip.timelineStartMs !== null) {
+      clip.timelineStartMs = Math.max(newCo, clip.timelineStartMs + delta);
+    }
+  }
+
+  const newTotal = getTotalDurationMs(next);
+
+  const shiftedWords: SubtitleWord[] = [];
+  for (const w of next.tracks.subtitles.words) {
+    if (oldCo > 0 && w.endMs <= oldCo) continue;
+    const ns = Math.max(newCo, w.startMs + delta);
+    const ne = Math.min(newTotal, Math.max(ns + MIN_WORD_MS, w.endMs + delta));
+    if (ns < newTotal && ne - ns >= MIN_WORD_MS) {
+      shiftedWords.push({ ...w, startMs: ns, endMs: ne });
+    }
+  }
+  next.tracks.subtitles.words = shiftedWords;
+
+  const shiftedMutes: [number, number][] = [];
+  for (const [m0, m1] of next.tracks.subtitles.muteRanges) {
+    const nm0 = Math.max(0, m0 + delta);
+    const nm1 = Math.min(newTotal, m1 + delta);
+    if (nm1 > nm0) shiftedMutes.push([nm0, nm1]);
+  }
+  next.tracks.subtitles.muteRanges = shiftedMutes;
+
+  for (const seg of next.tracks.video.framing) {
+    if (seg.timelineStartMs > 0) {
+      seg.timelineStartMs = Math.max(1, seg.timelineStartMs + delta);
+    }
+    if (seg.timelineEndMs < oldTotal) {
+      seg.timelineEndMs = Math.max(seg.timelineStartMs + 1, seg.timelineEndMs + delta);
+    }
+  }
+  syncFramingToDuration(next);
+
+  const shiftedOverlays: OverlayItem[] = [];
+  for (const ov of next.tracks.overlays) {
+    if (ov.startMs === 0 && ov.endMs >= Math.max(250, oldTotal - 50)) {
+      shiftedOverlays.push({ ...ov, endMs: Math.max(250, newTotal) });
+    } else if (ov.startMs === 0) {
+      shiftedOverlays.push({ ...ov, endMs: Math.min(newTotal, Math.max(200, ov.endMs)) });
+    } else {
+      const ns = Math.max(0, Math.min(Math.max(0, newTotal - 200), ov.startMs + delta));
+      const ne = Math.min(newTotal, Math.max(ns + 200, ov.endMs + delta));
+      if (ne > ns) {
+        shiftedOverlays.push({ ...ov, startMs: ns, endMs: ne });
+      }
+    }
+  }
+  next.tracks.overlays = shiftedOverlays;
+
+  if (next.tracks.video.broll) {
+    for (const br of next.tracks.video.broll) {
+      if (oldCo === 0 || br.timelineStartMs >= oldCo) {
+        br.timelineStartMs = Math.max(0, br.timelineStartMs + delta);
+      }
+    }
+  }
+  if (next.tracks.audio.clips) {
+    for (const ac of next.tracks.audio.clips) {
+      if (oldCo === 0 || ac.timelineStartMs >= oldCo) {
+        ac.timelineStartMs = Math.max(0, ac.timelineStartMs + delta);
+      }
+    }
+  }
+
+  return next;
+}
+
 export function trimClipEdges(
   edl: TimelineProject,
   clipId: string,
@@ -582,10 +844,11 @@ export function trimClipEdges(
   },
 ): TimelineProject {
   const next = cloneEdl(edl);
-  const target = next.tracks.video.clips.find((c) => c.id === clipId);
-  if (!target) {
+  const idx = next.tracks.video.clips.findIndex((c) => c.id === clipId);
+  if (idx === -1) {
     throw new Error(`Clip '${clipId}' not found.`);
   }
+  const target = next.tracks.video.clips[idx];
   const s0 =
     opts.sourceStartMs !== undefined
       ? Math.max(0, Math.round(opts.sourceStartMs))
@@ -605,6 +868,7 @@ export function trimClipEdges(
         ? null
         : Math.max(0, Math.round(opts.timelineStartMs));
   }
+  remapTracksAfterClipEdit(edl, next, idx);
   syncFramingToDuration(next);
   return next;
 }
@@ -633,15 +897,17 @@ export function setClipSpeed(
   reverse?: boolean,
 ): TimelineProject {
   const next = cloneEdl(edl);
-  const target = next.tracks.video.clips.find((c) => c.id === clipId);
-  if (!target) {
+  const idx = next.tracks.video.clips.findIndex((c) => c.id === clipId);
+  if (idx === -1) {
     throw new Error(`Clip '${clipId}' not found.`);
   }
+  const target = next.tracks.video.clips[idx];
   target.speed = Math.round(Math.max(0.25, Math.min(4.0, speed)) * 1000) / 1000;
   target.freezeDurationMs = 0;
   if (reverse !== undefined) {
     target.reverse = reverse;
   }
+  remapTracksAfterClipEdit(edl, next, idx);
   syncFramingToDuration(next);
   return next;
 }

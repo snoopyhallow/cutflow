@@ -379,7 +379,7 @@ def transcribe_clip_project(
     import tempfile
 
     from ..ai import infer_word_glow_color, transcribe_wav
-    from ..audio import run_clip_scoped_alignment
+    from ..audio import extract_lossless_clip_slice, run_clip_scoped_alignment
     from ..db.models import utcnow_iso
     from ..edl.schema import SubtitleWord
     from ..render.compiler import _build_atempo_filters
@@ -398,6 +398,15 @@ def transcribe_clip_project(
         job = session.get(JobRow, proj.job_id)
         media_path, input_origin_ms = _resolve_render_media(proj, source, job)
         edl = TimelineProject.model_validate(proj.edl_json)
+        has_raw_src = (
+            source is not None
+            and not source.archived
+            and bool(source.path)
+            and Path(source.path).is_file()
+        )
+        raw_source_path = Path(source.path) if (has_raw_src and source is not None) else None
+        proxy_path_str = proj.proxy_path or ""
+        source_dur_ms = int(source.duration_ms or 0) if source is not None else 0
         source_media_map: dict[str, tuple[Path, int]] = {
             proj.source_id: (media_path, input_origin_ms)
         }
@@ -406,6 +415,26 @@ def transcribe_clip_project(
                 extra = session.get(SourceRow, sl.source_id)
                 if extra and not extra.archived and extra.path and Path(extra.path).is_file():
                     source_media_map[sl.source_id] = (Path(extra.path), 0)
+
+    # Heal legacy keyframe-shifted clip_slice.mp4 automatically when raw source exists!
+    refreshed_origin_ms: int | None = None
+    if raw_source_path is not None and proxy_path_str and edl.tracks.video.clips:
+        slice_target = Path(proxy_path_str)
+        s_min = min(c.source_start_ms for c in edl.tracks.video.clips)
+        s_max = max(c.source_end_ms for c in edl.tracks.video.clips)
+        if edl.tracks.video.cold_open and edl.tracks.video.cold_open.enabled:
+            co = edl.tracks.video.cold_open
+            s_min = min(s_min, co.source_start_ms)
+            s_max = max(s_max, co.source_start_ms + co.duration_ms)
+        with contextlib.suppress(Exception):
+            _, refreshed_origin_ms = extract_lossless_clip_slice(
+                raw_source_path,
+                slice_target,
+                clip_start_ms=s_min,
+                clip_end_ms=s_max,
+                handle_ms=3000,
+                source_duration_ms=source_dur_ms or None,
+            )
 
     before = edl.model_copy(deep=True)
     updated = edl.model_copy(deep=True)
@@ -499,11 +528,24 @@ def transcribe_clip_project(
     if new_words:
         updated.tracks.subtitles.enabled = True
 
+    updated_at_out = ""
+    effective_origin_ms = (
+        refreshed_origin_ms if refreshed_origin_ms is not None else input_origin_ms
+    )
     with get_session() as session:
         row = session.get(ClipProjectRow, project_id)
         if row is not None:
             row.edl_json = updated.to_canonical_dict()
             row.updated_at = utcnow_iso()
+            updated_at_out = row.updated_at
+            if refreshed_origin_ms is not None:
+                job_row = session.get(JobRow, row.job_id)
+                if job_row is not None:
+                    st = dict(job_row.settings_json or {})
+                    origins = dict(st.get("sliceOriginByProject") or {})
+                    origins[project_id] = refreshed_origin_ms
+                    st["sliceOriginByProject"] = origins
+                    job_row.settings_json = st
 
     return {
         "edl": updated.to_canonical_dict(),
@@ -512,4 +554,6 @@ def transcribe_clip_project(
         "provider": provider_used,
         "language": detected_lang,
         "totalDurationMs": TimelineMapper(updated).total_duration_ms,
+        "sliceOriginMs": effective_origin_ms,
+        "updatedAt": updated_at_out,
     }

@@ -26,6 +26,7 @@ from ..ai import (
     transcribe_hot_windows,
     transcribe_wav,
 )
+from ..ai.transcription import release_whisper_cache
 from ..audio import (
     WordTiming,
     detect_active_video_box,
@@ -143,29 +144,89 @@ def _slice_words_for_arc(
     slices: list[tuple[int, int]],
     clip_wav: Path | None,
     aligner_mode: str,
+    *,
+    source_path: Path | None = None,
+    source_duration_ms: int = 0,
+    transcript_provider: str = "",
+    transcriber: Callable[..., TranscriptResult] | None = None,
+    settings: config.Settings | None = None,
+    audio_rel_index: int = 0,
+    audio_channels: int = 2,
+    center_dialogue_boost: bool = False,
 ) -> list[WordTiming]:
-    """Extract and align clip-relative words across one or more story-arc sub-slices."""
+    """Extract and align clip-relative words across one or more story-arc sub-slices.
+
+    Runs clip-scoped Whisper + 20ms onset alignment directly on the exact short clip WAV
+    whenever the job transcript came from coarse cues (embedded/sidecar SRT, Gemini Audio,
+    or empty) OR on long sources (>90s) where full-VOD Whisper chunking or hot-window
+    boundaries could otherwise introduce drift relative to ``clip_16k.wav``.
+    """
+    coarse_provider = (
+        transcript_provider in ("embedded_subs", "sidecar_subs", "none")
+        or transcript_provider.startswith("gemini:")
+    )
+    prefer_clip_realign = coarse_provider or (
+        source_duration_ms > 90_000 and transcriber is transcribe_wav
+    )
+
     if len(slices) == 1:
         raw = _slice_words_for_clip(words, slices[0][0], slices[0][1])
+        if (
+            (prefer_clip_realign or not raw)
+            and transcriber is not None
+            and clip_wav is not None
+            and clip_wav.is_file()
+        ):
+            hint = " ".join(w.text for w in raw)[:320]
+            with contextlib.suppress(Exception):
+                sub_tx = transcriber(clip_wav, initial_prompt=hint, settings=settings)
+                if sub_tx.words:
+                    return run_clip_scoped_alignment(sub_tx.words, clip_wav, mode=aligner_mode)
         if clip_wav is not None and clip_wav.is_file():
             return run_clip_scoped_alignment(raw, clip_wav, mode=aligner_mode)
         return raw
 
+    import tempfile
+
     combined: list[WordTiming] = []
     offset_ms = 0
-    for s0, s1 in slices:
-        part = _slice_words_for_clip(words, s0, s1)
-        for item in part:
-            combined.append(
-                WordTiming(
-                    text=item.text,
-                    start_ms=offset_ms + item.start_ms,
-                    end_ms=offset_ms + item.end_ms,
-                    speaker=item.speaker,
-                    confidence=item.confidence,
+    with tempfile.TemporaryDirectory(prefix="cutflow_arc_align_") as tmp:
+        tmp_dir = Path(tmp)
+        for idx, (s0, s1) in enumerate(slices):
+            dur_ms = max(0, s1 - s0)
+            if dur_ms < 200:
+                continue
+            part = _slice_words_for_clip(words, s0, s1)
+            if source_path is not None and source_path.is_file():
+                seg_wav = tmp_dir / f"arc_{idx}.wav"
+                with contextlib.suppress(Exception):
+                    extract_wav_16k(
+                        source_path,
+                        seg_wav,
+                        start_ms=s0,
+                        duration_ms=dur_ms,
+                        audio_rel_index=audio_rel_index,
+                        audio_channels=audio_channels,
+                        center_dialogue_boost=center_dialogue_boost,
+                    )
+                    if (prefer_clip_realign or not part) and transcriber is not None:
+                        hint = " ".join(w.text for w in part)[:320]
+                        sub_tx = transcriber(seg_wav, initial_prompt=hint, settings=settings)
+                        if sub_tx.words:
+                            part = sub_tx.words
+                    part = run_clip_scoped_alignment(part, seg_wav, mode=aligner_mode)
+
+            for item in part:
+                combined.append(
+                    WordTiming(
+                        text=item.text,
+                        start_ms=offset_ms + max(0, min(dur_ms - 40, item.start_ms)),
+                        end_ms=offset_ms + max(item.start_ms + 40, min(dur_ms, item.end_ms)),
+                        speaker=item.speaker,
+                        confidence=item.confidence,
+                    )
                 )
-            )
-        offset_ms += max(0, s1 - s0)
+            offset_ms += dur_ms
     return combined
 
 
@@ -411,6 +472,14 @@ def run_job_pipeline_sync(
                     arc_bounds,
                     clip_wav if len(arc_bounds) == 1 else None,
                     cfg.alignment.forced_aligner,
+                    source_path=source_path,
+                    source_duration_ms=media.duration_ms,
+                    transcript_provider=transcript.provider,
+                    transcriber=transcriber,
+                    settings=cfg,
+                    audio_rel_index=media.preferred_audio_rel_index,
+                    audio_channels=media.audio_channels,
+                    center_dialogue_boost=center_boost,
                 )
 
                 crop_box_model = (
@@ -517,6 +586,8 @@ def run_job_pipeline_sync(
             bus=bus,
         )
         raise
+    finally:
+        release_whisper_cache()
 
 
 class JobManager:

@@ -341,6 +341,8 @@ export interface TranscribeProjectResponse {
   provider: string;
   language: string;
   totalDurationMs: number;
+  sliceOriginMs?: number;
+  updatedAt?: string;
 }
 
 export interface AiModelsResponse {

@@ -13,7 +13,9 @@ from pathlib import Path
 import httpx
 
 from .. import config
-from ..audio.align import WordTiming
+from ..audio.align import WordTiming, align_words_to_audio, normalize_word_timings
+from ..audio.peaks import read_mono_pcm_f32
+from ..cuda import ensure_cuda_libraries
 from ..security import get_secret
 from .hype import HotWindow
 from .llm import parse_json_payload
@@ -25,6 +27,36 @@ _GEMINI_AUDIO_MODELS: tuple[str, ...] = (
     "gemini-flash-lite-latest",
     "gemini-3.1-flash-lite",
 )
+
+_WHISPER_MODEL_CACHE: dict[tuple[str, str, str], object] = {}
+
+
+def release_whisper_cache() -> None:
+    """Release any cached faster-whisper model from CPU/CUDA memory."""
+    if not _WHISPER_MODEL_CACHE:
+        return
+    _WHISPER_MODEL_CACHE.clear()
+    gc.collect()
+    try:
+        import torch  # type: ignore[import-not-found]
+
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
+    except Exception:
+        pass
+
+
+def _get_whisper_model(model_size: str, device: str, compute_type: str) -> object:
+    key = (model_size, device, compute_type)
+    cached = _WHISPER_MODEL_CACHE.get(key)
+    if cached is not None:
+        return cached
+    release_whisper_cache()
+    from faster_whisper import WhisperModel  # type: ignore[import-not-found]
+
+    loaded = WhisperModel(model_size, device=device, compute_type=compute_type)
+    _WHISPER_MODEL_CACHE[key] = loaded
+    return loaded
 
 
 @dataclass(slots=True)
@@ -96,6 +128,7 @@ def _words_from_segment_span(text: str, start_ms: int, end_ms: int) -> list[Word
 
 def select_faster_whisper_targets() -> list[tuple[str, str]]:
     """Return ordered ``(device, compute_type)`` targets safe for Pascal GPUs & CPU."""
+    ensure_cuda_libraries()
     targets: list[tuple[str, str]] = []
     try:
         import ctranslate2  # type: ignore[import-not-found]
@@ -167,12 +200,33 @@ def _transcribe_cloud_whisper(
                 TranscriptSegment(start_ms=s_ms, end_ms=e_ms, text=text, words=seg_words)
             )
 
+    words = align_words_to_audio(words, wav_path) if words else normalize_word_timings(words)
+    segments = _segments_from_words(words) if words else segments
     return TranscriptResult(
         language=str(payload.get("language") or language or "en"),
         provider=provider_name,
         segments=segments,
         words=words,
     )
+
+
+def _load_whisper_pcm_16k(wav_path: Path) -> object:
+    """Decode a 16kHz WAV file into a 1-D float32 numpy array without PyAV ``av.open``.
+
+    Avoids the PyAV >= 19 ``open() got an unexpected keyword argument 'metadata_errors'``
+    crash inside ``faster_whisper.audio.decode_audio`` while running with zero subprocesses.
+    """
+    sr, samples = read_mono_pcm_f32(wav_path)
+    if samples.size == 0:
+        return samples
+    if sr != 16000 and sr > 0:
+        import numpy as np
+
+        target_len = max(1, int(round(samples.size * (16000.0 / sr))))
+        x_old = np.linspace(0.0, 1.0, num=samples.size, endpoint=False)
+        x_new = np.linspace(0.0, 1.0, num=target_len, endpoint=False)
+        samples = np.interp(x_new, x_old, samples).astype(np.float32)
+    return samples
 
 
 def _transcribe_faster_whisper(
@@ -184,18 +238,35 @@ def _transcribe_faster_whisper(
     no_speech_threshold: float,
     log_prob_threshold: float,
 ) -> TranscriptResult:
-    from faster_whisper import WhisperModel  # type: ignore[import-not-found]
+    ensure_cuda_libraries()
+    import faster_whisper as _fw  # type: ignore[import-not-found]  # noqa: F401
+
+    pcm_samples = _load_whisper_pcm_16k(wav_path)
+    if getattr(pcm_samples, "size", 0) == 0:
+        return TranscriptResult(
+            language=language or "en",
+            provider="faster_whisper:empty",
+            segments=[],
+            words=[],
+        )
 
     last_exc: Exception | None = None
     for device, compute_type in select_faster_whisper_targets():
-        model = None
         try:
-            model = WhisperModel(model_size, device=device, compute_type=compute_type)
-            seg_iter, info = model.transcribe(
-                str(wav_path),
+            model = _get_whisper_model(model_size, device, compute_type)
+            # Match AutoClip's exact Whisper decoding parameters:
+            # vad_filter=False keeps speech over game audio / movie music without shifting
+            # timestamps or requiring onnxruntime; beam_size=5 + hallucination_silence_threshold
+            # gives crisp, word-accurate DTW alignment.
+            seg_iter, info = model.transcribe(  # type: ignore[attr-defined]
+                pcm_samples,  # type: ignore[arg-type]
                 language=language or None,
                 word_timestamps=True,
-                vad_filter=True,
+                vad_filter=False,
+                beam_size=5,
+                condition_on_previous_text=True,
+                hallucination_silence_threshold=1.5,
+                repetition_penalty=1.05,
                 no_speech_threshold=no_speech_threshold,
                 log_prob_threshold=log_prob_threshold,
                 initial_prompt=initial_prompt or None,
@@ -233,6 +304,8 @@ def _transcribe_faster_whisper(
                             words=seg_words,
                         )
                     )
+            all_words = align_words_to_audio(all_words, wav_path)
+            segments = _segments_from_words(all_words) if all_words else segments
             lang = str(getattr(info, "language", "") or language or "en")
             return TranscriptResult(
                 language=lang,
@@ -241,6 +314,7 @@ def _transcribe_faster_whisper(
                 words=all_words,
             )
         except Exception as exc:
+            release_whisper_cache()
             last_exc = exc
             log.info(
                 "faster-whisper (%s/%s) unavailable (%s); trying next target.",
@@ -248,17 +322,6 @@ def _transcribe_faster_whisper(
                 compute_type,
                 exc,
             )
-        finally:
-            if model is not None:
-                del model
-            gc.collect()
-            try:
-                import torch  # type: ignore[import-not-found]
-
-                if torch.cuda.is_available():
-                    torch.cuda.empty_cache()
-            except Exception:
-                pass
 
     raise RuntimeError(f"faster-whisper failed across all targets: {last_exc}")
 
@@ -442,6 +505,124 @@ def _slice_wav_segment(src_wav: Path, dest_wav: Path, start_ms: int, end_ms: int
     return dest_wav
 
 
+def _transcribe_windows_faster_whisper_single_load(
+    wav_path: Path,
+    windows: list[HotWindow],
+    *,
+    initial_prompt: str,
+    settings: config.Settings,
+) -> TranscriptResult:
+    """Load WhisperModel ONCE and transcribe all hot windows directly from 16kHz float32 PCM."""
+    ensure_cuda_libraries()
+    from faster_whisper import WhisperModel  # type: ignore[import-not-found]
+
+    sr, full_samples = read_mono_pcm_f32(wav_path)
+    if full_samples.size == 0 or sr <= 0:
+        return TranscriptResult(
+            language="en", provider="faster_whisper:empty", segments=[], words=[]
+        )
+
+    align_cfg = settings.alignment
+    model_size = align_cfg.whisper_model or "small"
+    last_exc: Exception | None = None
+
+    for device, compute_type in select_faster_whisper_targets():
+        model = None
+        try:
+            model = WhisperModel(model_size, device=device, compute_type=compute_type)
+            merged_words: list[WordTiming] = []
+            detected_lang = align_cfg.language or "en"
+
+            for win in windows:
+                if win.end_ms - win.start_ms < 400:
+                    continue
+                i0 = max(0, min(full_samples.size, int(round((win.start_ms / 1000.0) * sr))))
+                i1 = max(i0, min(full_samples.size, int(round((win.end_ms / 1000.0) * sr))))
+                chunk = full_samples[i0:i1]
+                if chunk.size < int(sr * 0.25):
+                    continue
+                if sr != 16000:
+                    import numpy as np
+
+                    target_len = max(1, int(round(chunk.size * (16000.0 / sr))))
+                    chunk = np.interp(
+                        np.linspace(0.0, 1.0, num=target_len, endpoint=False),
+                        np.linspace(0.0, 1.0, num=chunk.size, endpoint=False),
+                        chunk,
+                    ).astype(np.float32)
+
+                seg_iter, info = model.transcribe(
+                    chunk,
+                    language=align_cfg.language or None,
+                    word_timestamps=True,
+                    vad_filter=False,
+                    beam_size=5,
+                    condition_on_previous_text=True,
+                    hallucination_silence_threshold=1.5,
+                    repetition_penalty=1.05,
+                    no_speech_threshold=align_cfg.no_speech_threshold,
+                    log_prob_threshold=align_cfg.log_prob_threshold,
+                    initial_prompt=initial_prompt or None,
+                )
+                if getattr(info, "language", ""):
+                    detected_lang = str(info.language)
+
+                offset = win.start_ms
+                for seg in seg_iter:
+                    seg_words_found = False
+                    for w in getattr(seg, "words", None) or []:
+                        token = str(getattr(w, "word", "")).strip()
+                        if not token:
+                            continue
+                        seg_words_found = True
+                        s_ms = offset + max(0, int(round(float(w.start) * 1000.0)))
+                        e_ms = max(s_ms + 60, offset + int(round(float(w.end) * 1000.0)))
+                        merged_words.append(
+                            WordTiming(
+                                text=token,
+                                start_ms=s_ms,
+                                end_ms=e_ms,
+                                confidence=getattr(w, "probability", None),
+                            )
+                        )
+                    if not seg_words_found:
+                        text = str(getattr(seg, "text", "")).strip()
+                        if text:
+                            s_seg = offset + max(0, int(round(float(seg.start) * 1000.0)))
+                            e_seg = max(s_seg + 100, offset + int(round(float(seg.end) * 1000.0)))
+                            merged_words.extend(_words_from_segment_span(text, s_seg, e_seg))
+
+            merged_words.sort(key=lambda w: (w.start_ms, w.end_ms))
+            aligned_words = align_words_to_audio(merged_words, wav_path)
+            return TranscriptResult(
+                language=detected_lang,
+                provider=f"faster_whisper:{device}:{compute_type}:{model_size}",
+                segments=_segments_from_words(aligned_words),
+                words=aligned_words,
+            )
+        except Exception as exc:
+            last_exc = exc
+            log.info(
+                "faster-whisper window scan (%s/%s) failed (%s); trying next target.",
+                device,
+                compute_type,
+                exc,
+            )
+        finally:
+            if model is not None:
+                del model
+            gc.collect()
+            try:
+                import torch  # type: ignore[import-not-found]
+
+                if torch.cuda.is_available():
+                    torch.cuda.empty_cache()
+            except Exception:
+                pass
+
+    raise RuntimeError(f"faster-whisper hot-window scan failed: {last_exc}")
+
+
 def transcribe_hot_windows(
     wav_path: Path,
     windows: list[HotWindow] | None = None,
@@ -451,16 +632,31 @@ def transcribe_hot_windows(
     transcriber_fn=None,
 ) -> TranscriptResult:
     """Transcribe either the full WAV or only selected multi-signal hot windows on long VODs."""
+    cfg = settings or config.load()
     runner = transcriber_fn or transcribe_wav
     if not windows:
-        return runner(wav_path, initial_prompt=initial_prompt, settings=settings)
+        return runner(wav_path, initial_prompt=initial_prompt, settings=cfg)
 
-    if (
-        len(windows) == 1
-        and windows[0].start_ms == 0
-        and wav_path.stat().st_size <= 18 * 1024 * 1024
-    ):
-        return runner(wav_path, initial_prompt=initial_prompt, settings=settings)
+    # Single full-span window -> call runner directly when small OR use single-load faster-whisper
+    if len(windows) == 1 and windows[0].start_ms == 0:
+        if transcriber_fn is not None or wav_path.stat().st_size <= 24 * 1024 * 1024:
+            return runner(wav_path, initial_prompt=initial_prompt, settings=cfg)
+        try:
+            return _transcribe_windows_faster_whisper_single_load(
+                wav_path, windows, initial_prompt=initial_prompt, settings=cfg
+            )
+        except Exception as exc:
+            log.warning("Single-load faster-whisper failed on large WAV (%s).", exc)
+            return runner(wav_path, initial_prompt=initial_prompt, settings=cfg)
+
+    # Multiple hot windows without custom test stub and no Groq cloud key -> load Whisper ONCE!
+    if transcriber_fn is None and not get_secret("groq"):
+        try:
+            return _transcribe_windows_faster_whisper_single_load(
+                wav_path, windows, initial_prompt=initial_prompt, settings=cfg
+            )
+        except Exception as exc:
+            log.warning("Single-load faster-whisper window scan fell back (%s).", exc)
 
     merged_segments: list[TranscriptSegment] = []
     merged_words: list[WordTiming] = []

@@ -425,6 +425,236 @@ def delete_clip(edl: TimelineProject, clip_id: str, *, ripple: bool = True) -> T
     return next_edl
 
 
+def _remap_tracks_after_clip_edit(
+    before_edl: TimelineProject,
+    next_edl: TimelineProject,
+    edited_idx: int,
+) -> None:
+    """Keep subtitle words, overlays, B-roll, and audio clips synced after clip trim/speed."""
+    before_mapper = TimelineMapper(before_edl)
+    after_mapper = TimelineMapper(next_edl)
+    before_spans = before_mapper.spans
+    after_spans = after_mapper.spans
+    if not before_spans or len(before_spans) != len(after_spans):
+        return
+
+    body_start = before_mapper.cold_open_ms
+    old_total = before_mapper.total_duration_ms
+    new_total = after_mapper.total_duration_ms
+
+    remapped_words: list[SubtitleWord] = []
+    for w in next_edl.tracks.subtitles.words:
+        if w.end_ms <= body_start:
+            clamped_e = min(new_total, w.end_ms)
+            if clamped_e - w.start_ms >= MIN_WORD_MS:
+                remapped_words.append(w.model_copy(update={"end_ms": clamped_e}))
+            continue
+
+        mid = 0.5 * (w.start_ms + w.end_ms)
+        span_idx = len(before_spans) - 1
+        for k, (_bt0, bt1, _) in enumerate(before_spans):
+            if mid <= bt1:
+                span_idx = k
+                break
+
+        bt0, _bt1, b_clip = before_spans[span_idx]
+        at0, at1, a_clip = after_spans[span_idx]
+        if span_idx != edited_idx:
+            shift = at0 - bt0
+            ns = max(0, w.start_ms + shift)
+            ne = min(new_total, w.end_ms + shift)
+            if ne - ns >= MIN_WORD_MS:
+                remapped_words.append(w.model_copy(update={"start_ms": ns, "end_ms": ne}))
+            continue
+
+        if b_clip.freeze_duration_ms > 0 or a_clip.freeze_duration_ms > 0:
+            ns = max(at0, min(at1 - MIN_WORD_MS, at0 + (w.start_ms - bt0)))
+            ne = min(at1, max(ns + MIN_WORD_MS, at0 + (w.end_ms - bt0)))
+            if ne - ns >= MIN_WORD_MS:
+                remapped_words.append(w.model_copy(update={"start_ms": ns, "end_ms": ne}))
+            continue
+
+        b_spd = max(0.25, float(b_clip.speed))
+        a_spd = max(0.25, float(a_clip.speed))
+        rel_s = w.start_ms - bt0
+        rel_e = w.end_ms - bt0
+        if b_clip.reverse:
+            src_hi = b_clip.source_end_ms - rel_s * b_spd
+            src_lo = b_clip.source_end_ms - rel_e * b_spd
+        else:
+            src_lo = b_clip.source_start_ms + rel_s * b_spd
+            src_hi = b_clip.source_start_ms + rel_e * b_spd
+
+        c_lo = max(float(a_clip.source_start_ms), src_lo)
+        c_hi = min(float(a_clip.source_end_ms), src_hi)
+        if (c_hi - c_lo) / a_spd < MIN_WORD_MS:
+            continue
+
+        if a_clip.reverse:
+            ns = at0 + int(round((a_clip.source_end_ms - c_hi) / a_spd))
+            ne = at0 + int(round((a_clip.source_end_ms - c_lo) / a_spd))
+        else:
+            ns = at0 + int(round((c_lo - a_clip.source_start_ms) / a_spd))
+            ne = at0 + int(round((c_hi - a_clip.source_start_ms) / a_spd))
+
+        ns = max(at0, min(max(at0, at1 - MIN_WORD_MS), ns))
+        ne = min(at1, max(ns + MIN_WORD_MS, ne))
+        if ne - ns >= MIN_WORD_MS:
+            remapped_words.append(w.model_copy(update={"start_ms": ns, "end_ms": ne}))
+
+    remapped_words.sort(key=lambda item: (item.start_ms, item.end_ms))
+    next_edl.tracks.subtitles.words = remapped_words
+
+    old_edit_end = before_spans[edited_idx][1]
+    tail_delta = after_spans[edited_idx][1] - old_edit_end
+    if tail_delta != 0:
+        for br in next_edl.tracks.video.broll:
+            if br.timeline_start_ms >= old_edit_end:
+                br.timeline_start_ms = max(0, br.timeline_start_ms + tail_delta)
+        for ac in next_edl.tracks.audio.clips:
+            if ac.timeline_start_ms >= old_edit_end:
+                ac.timeline_start_ms = max(0, ac.timeline_start_ms + tail_delta)
+
+    kept_overlays: list[OverlayItem] = []
+    for ov in next_edl.tracks.overlays:
+        if ov.start_ms == 0 and ov.end_ms >= max(250, old_total - 50):
+            kept_overlays.append(ov.model_copy(update={"end_ms": max(250, new_total)}))
+        elif ov.start_ms >= old_edit_end and tail_delta != 0:
+            ns = max(0, ov.start_ms + tail_delta)
+            ne = min(new_total, ov.end_ms + tail_delta)
+            if ne - ns >= 150:
+                kept_overlays.append(ov.model_copy(update={"start_ms": ns, "end_ms": ne}))
+        else:
+            clamped_end = min(new_total, ov.end_ms)
+            if clamped_end > ov.start_ms:
+                kept_overlays.append(ov.model_copy(update={"end_ms": clamped_end}))
+    next_edl.tracks.overlays = kept_overlays
+
+
+def set_cold_open(
+    edl: TimelineProject,
+    *,
+    enabled: bool,
+    source_start_ms: int | None = None,
+    duration_ms: int | None = None,
+    fade_out_ms: int | None = None,
+) -> TimelineProject:
+    """Enable, disable, or resize the Cold-Open teaser while shifting body words & tracks."""
+    before_mapper = TimelineMapper(edl)
+    old_co = before_mapper.cold_open_ms
+    old_total = before_mapper.total_duration_ms
+    next_edl = edl.model_copy(deep=True)
+    prev_block = edl.tracks.video.cold_open
+
+    if not enabled:
+        next_edl.tracks.video.cold_open = None
+        new_co = 0
+    else:
+        first_clip = next_edl.tracks.video.clips[0]
+        default_src = int(
+            round(
+                first_clip.source_start_ms
+                + (first_clip.source_end_ms - first_clip.source_start_ms) * 0.6
+            )
+        )
+        resolved_src = max(
+            0,
+            int(
+                source_start_ms
+                if source_start_ms is not None
+                else (prev_block.source_start_ms if prev_block is not None else default_src)
+            ),
+        )
+        resolved_dur = max(
+            500,
+            min(
+                4000,
+                int(
+                    duration_ms
+                    if duration_ms is not None
+                    else (prev_block.duration_ms if prev_block is not None else 1500)
+                ),
+            ),
+        )
+        resolved_fade = max(
+            0,
+            min(
+                1000,
+                int(
+                    fade_out_ms
+                    if fade_out_ms is not None
+                    else (prev_block.fade_out_ms if prev_block is not None else 120)
+                ),
+            ),
+        )
+        next_edl.tracks.video.cold_open = ColdOpenBlock(
+            enabled=True,
+            source_start_ms=resolved_src,
+            duration_ms=resolved_dur,
+            fade_out_ms=resolved_fade,
+        )
+        new_co = resolved_dur
+
+    delta = new_co - old_co
+    if delta == 0:
+        _sync_framing_to_duration(next_edl)
+        return next_edl
+
+    for clip in next_edl.tracks.video.clips:
+        if clip.timeline_start_ms is not None:
+            clip.timeline_start_ms = max(new_co, clip.timeline_start_ms + delta)
+
+    new_total = TimelineMapper(next_edl).total_duration_ms
+
+    shifted_words: list[SubtitleWord] = []
+    for w in next_edl.tracks.subtitles.words:
+        if old_co > 0 and w.end_ms <= old_co:
+            continue
+        ns = max(new_co, w.start_ms + delta)
+        ne = min(new_total, max(ns + MIN_WORD_MS, w.end_ms + delta))
+        if ns < new_total and ne - ns >= MIN_WORD_MS:
+            shifted_words.append(w.model_copy(update={"start_ms": ns, "end_ms": ne}))
+    next_edl.tracks.subtitles.words = shifted_words
+
+    shifted_mutes: list[tuple[int, int]] = []
+    for m0, m1 in next_edl.tracks.subtitles.mute_ranges:
+        nm0 = max(0, m0 + delta)
+        nm1 = min(new_total, m1 + delta)
+        if nm1 > nm0:
+            shifted_mutes.append((nm0, nm1))
+    next_edl.tracks.subtitles.mute_ranges = shifted_mutes
+
+    for seg in next_edl.tracks.video.framing:
+        if seg.timeline_start_ms > 0:
+            seg.timeline_start_ms = max(1, seg.timeline_start_ms + delta)
+        if seg.timeline_end_ms < old_total:
+            seg.timeline_end_ms = max(seg.timeline_start_ms + 1, seg.timeline_end_ms + delta)
+    _sync_framing_to_duration(next_edl)
+
+    shifted_overlays: list[OverlayItem] = []
+    for ov in next_edl.tracks.overlays:
+        if ov.start_ms == 0 and ov.end_ms >= max(250, old_total - 50):
+            shifted_overlays.append(ov.model_copy(update={"end_ms": max(250, new_total)}))
+        elif ov.start_ms == 0:
+            clamped_end = min(new_total, max(200, ov.end_ms))
+            shifted_overlays.append(ov.model_copy(update={"end_ms": clamped_end}))
+        else:
+            ns = max(0, min(max(0, new_total - 200), ov.start_ms + delta))
+            ne = min(new_total, max(ns + 200, ov.end_ms + delta))
+            if ne > ns:
+                shifted_overlays.append(ov.model_copy(update={"start_ms": ns, "end_ms": ne}))
+    next_edl.tracks.overlays = shifted_overlays
+
+    for br in next_edl.tracks.video.broll:
+        if old_co == 0 or br.timeline_start_ms >= old_co:
+            br.timeline_start_ms = max(0, br.timeline_start_ms + delta)
+    for ac in next_edl.tracks.audio.clips:
+        if old_co == 0 or ac.timeline_start_ms >= old_co:
+            ac.timeline_start_ms = max(0, ac.timeline_start_ms + delta)
+
+    return next_edl
+
+
 def trim_clip_edges(
     edl: TimelineProject,
     clip_id: str,
@@ -433,11 +663,12 @@ def trim_clip_edges(
     source_end_ms: int | None = None,
     timeline_start_ms: Any = _UNSET,
 ) -> TimelineProject:
-    """Trim source in/out bounds (and optional timeline gap start) of a V1 clip."""
+    """Trim source in/out bounds (and optional timeline gap start) while syncing words."""
     next_edl = edl.model_copy(deep=True)
-    target = next((c for c in next_edl.tracks.video.clips if c.id == clip_id), None)
-    if target is None:
+    idx = next((i for i, c in enumerate(next_edl.tracks.video.clips) if c.id == clip_id), None)
+    if idx is None:
         raise ValueError(f"Clip {clip_id!r} not found.")
+    target = next_edl.tracks.video.clips[idx]
 
     new_s0 = target.source_start_ms if source_start_ms is None else max(0, int(source_start_ms))
     new_e0 = (
@@ -453,6 +684,7 @@ def trim_clip_edges(
         target.timeline_start_ms = (
             None if timeline_start_ms is None else max(0, int(timeline_start_ms))
         )
+    _remap_tracks_after_clip_edit(edl, next_edl, idx)
     _sync_framing_to_duration(next_edl)
     return next_edl
 
@@ -483,15 +715,17 @@ def set_clip_speed(
     *,
     reverse: bool | None = None,
 ) -> TimelineProject:
-    """Set playback speed (0.25x-4.0x) and optional reverse flag on a V1 clip."""
+    """Set playback speed (0.25x-4.0x) and optional reverse flag while remapping words."""
     next_edl = edl.model_copy(deep=True)
-    target = next((c for c in next_edl.tracks.video.clips if c.id == clip_id), None)
-    if target is None:
+    idx = next((i for i, c in enumerate(next_edl.tracks.video.clips) if c.id == clip_id), None)
+    if idx is None:
         raise ValueError(f"Clip {clip_id!r} not found.")
+    target = next_edl.tracks.video.clips[idx]
     target.speed = round(max(0.25, min(4.0, float(speed))), 3)
     target.freeze_duration_ms = 0
     if reverse is not None:
         target.reverse = bool(reverse)
+    _remap_tracks_after_clip_edit(edl, next_edl, idx)
     _sync_framing_to_duration(next_edl)
     return next_edl
 
@@ -1132,16 +1366,20 @@ def apply_edl_patch(
 
         elif kind == "set_cold_open":
             if op.get("enabled") is False:
-                current.tracks.video.cold_open = None
-                _sync_framing_to_duration(current)
+                current = set_cold_open(current, enabled=False)
                 summaries.append("Cold-open → off")
             else:
-                current.tracks.video.cold_open = ColdOpenBlock(
+                src_raw = op.get("sourceStartMs")
+                dur_raw = op.get("durationMs")
+                fade_raw = op.get("fadeOutMs")
+                current = set_cold_open(
+                    current,
                     enabled=True,
-                    source_start_ms=max(0, int(op["sourceStartMs"])),
-                    duration_ms=max(500, min(4000, int(op.get("durationMs", 1500)))),
+                    source_start_ms=int(src_raw) if src_raw is not None else None,
+                    duration_ms=int(dur_raw) if dur_raw is not None else None,
+                    fade_out_ms=int(fade_raw) if fade_raw is not None else None,
                 )
-                _sync_framing_to_duration(current)
+                assert current.tracks.video.cold_open is not None
                 summaries.append(f"Cold-open → {current.tracks.video.cold_open.duration_ms}ms")
 
         elif kind == "set_framing":

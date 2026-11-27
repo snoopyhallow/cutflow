@@ -44,15 +44,65 @@ def hex_to_ass_bgr(hex_color: str, alpha: int = 0) -> str:
 
 
 def format_ass_time(ms: int) -> str:
-    """Format milliseconds into ASS timestamp ``H:MM:SS.cc`` (centiseconds)."""
-    clamped = max(0, int(ms))
-    centis = (clamped // 10) % 100
-    total_sec = clamped // 1000
+    """Format milliseconds into ASS timestamp ``H:MM:SS.cc`` (rounded centiseconds)."""
+    total_cs = max(0, int(round(ms / 10.0)))
+    centis = total_cs % 100
+    total_sec = total_cs // 100
     sec = total_sec % 60
     total_min = total_sec // 60
     minute = total_min % 60
     hour = total_min // 60
     return f"{hour}:{minute:02d}:{sec:02d}.{centis:02d}"
+
+
+def _enforce_non_overlapping_dialogue(events: list[str]) -> list[str]:
+    """Clamp adjacent same-layer ASS Dialogue events so centisecond rounding never stacks lines."""
+    if len(events) <= 1:
+        return events
+
+    parsed: list[tuple[str, int, int, str] | None] = []
+    for ev in events:
+        if not ev.startswith("Dialogue: "):
+            parsed.append(None)
+            continue
+        rest = ev[len("Dialogue: ") :]
+        parts = rest.split(",", 3)
+        if len(parts) < 4:
+            parsed.append(None)
+            continue
+        layer_str, s_str, e_str, tail = parts
+        try:
+            sh, sm, ss = s_str.split(":")
+            eh, em, es = e_str.split(":")
+            s_ms = int(round((int(sh) * 3600 + int(sm) * 60 + float(ss)) * 1000))
+            e_ms = int(round((int(eh) * 3600 + int(em) * 60 + float(es)) * 1000))
+            parsed.append((layer_str.strip(), s_ms, e_ms, tail))
+        except ValueError:
+            parsed.append(None)
+
+    by_layer_prev_idx: dict[str, int] = {}
+    items = list(parsed)
+    for idx, cur in enumerate(items):
+        if cur is None:
+            continue
+        layer, s_ms, _e_ms, _tail = cur
+        prev_i = by_layer_prev_idx.get(layer)
+        if prev_i is not None and items[prev_i] is not None:
+            p_layer, p_s, p_e, p_tail = items[prev_i]  # type: ignore[misc]
+            if p_e > s_ms:
+                items[prev_i] = (p_layer, p_s, max(p_s, s_ms), p_tail)
+        by_layer_prev_idx[layer] = idx
+
+    out: list[str] = []
+    for orig, item in zip(events, items, strict=True):
+        if item is None:
+            out.append(orig)
+            continue
+        layer, s_ms, e_ms, tail = item
+        if e_ms <= s_ms:
+            continue
+        out.append(f"Dialogue: {layer},{format_ass_time(s_ms)},{format_ass_time(e_ms)},{tail}")
+    return out
 
 
 def _escape_ass_text(text: str) -> str:
@@ -65,20 +115,29 @@ def _is_muted(word: SubtitleWord, mute_ranges: list[tuple[int, int]]) -> bool:
 
 
 def _group_words(
-    words: list[SubtitleWord], max_words: int = 3, max_gap_ms: int = 650
+    words: list[SubtitleWord],
+    max_words: int = 4,
+    max_gap_ms: int = 400,
+    max_span_ms: int = 2000,
 ) -> list[list[SubtitleWord]]:
+    """Split words into readable caption groups (AutoClip parity: pause, span, punctuation)."""
     if not words:
         return []
     groups: list[list[SubtitleWord]] = []
-    cur: list[SubtitleWord] = [words[0]]
-    for w in words[1:]:
-        gap = w.start_ms - cur[-1].end_ms
-        ends_sentence = cur[-1].text.rstrip().endswith((".", "!", "?"))
-        if len(cur) >= max_words or gap > max_gap_ms or ends_sentence:
+    cur: list[SubtitleWord] = []
+    for idx, w in enumerate(words):
+        if cur:
+            gap = w.start_ms - cur[-1].end_ms
+            span = w.end_ms - cur[0].start_ms
+            over_span = max_span_ms > 0 and span > max_span_ms
+            if gap > max_gap_ms or len(cur) >= max_words or over_span:
+                groups.append(cur)
+                cur = []
+        cur.append(w)
+        is_last = idx == len(words) - 1
+        if not is_last and w.text.rstrip().endswith((".", "!", "?", "…")):
             groups.append(cur)
-            cur = [w]
-        else:
-            cur.append(w)
+            cur = []
     if cur:
         groups.append(cur)
     return groups
@@ -370,11 +429,15 @@ def generate_ass_subtitles(
         return _escape_ass_text(txt)
 
     if preset == "cinema_neon_glow":
-        events = _emit_cinema_neon_events(visible_words, track, fmt_word)
+        events = _enforce_non_overlapping_dialogue(
+            _emit_cinema_neon_events(visible_words, track, fmt_word)
+        )
         return "\n".join(header + events) + "\n"
 
     if preset == "viral_punch_glow":
-        events = _emit_viral_punch_events(visible_words, track, fmt_word)
+        events = _enforce_non_overlapping_dialogue(
+            _emit_viral_punch_events(visible_words, track, fmt_word)
+        )
         return "\n".join(header + events) + "\n"
 
     events = []
@@ -390,33 +453,32 @@ def generate_ass_subtitles(
                 body = f"{pop_tag}{{\\1c{accent_bgr}}}{fmt_word(w.text)}"
             events.append(f"Dialogue: 0,{s},{e},Default,,0,0,0,,{body}")
     elif preset == "karaoke_fill":
-        # True libass \kf smooth sweep across each phrase group!
-        groups = _group_words(visible_words, max_words=3)
+        # AutoClip-parity \kf karaoke: roll <500ms inter-word gaps into preceding word sweep
+        groups = _group_words(visible_words, max_words=4)
         for group in groups:
             ev_start = group[0].start_ms
             ev_end = max(ev_start + 80, group[-1].end_ms)
             chunks: list[str] = []
-            cursor_ms = ev_start
-            for w in group:
-                gap_ms = max(0, w.start_ms - cursor_ms)
-                if gap_ms >= 20:
-                    chunks.append(f"{{\\k{max(1, round(gap_ms / 10))}}}")
-                dur_ms = max(60, w.end_ms - max(w.start_ms, cursor_ms))
-                chunks.append(f"{{\\kf{max(6, round(dur_ms / 10))}}}{fmt_word(w.text)}")
-                cursor_ms = max(cursor_ms, w.end_ms)
+            for idx, w in enumerate(group):
+                dur_ms = max(40, w.end_ms - w.start_ms)
+                if idx + 1 < len(group):
+                    gap_ms = group[idx + 1].start_ms - w.end_ms
+                    if 0 < gap_ms < 500:
+                        dur_ms += gap_ms
+                chunks.append(f"{{\\kf{max(1, round(dur_ms / 10.0))}}}{fmt_word(w.text)}")
             events.append(
                 f"Dialogue: 0,{format_ass_time(ev_start)},{format_ass_time(ev_end)},"
                 f"Default,,0,0,0,,{' '.join(chunks)}"
             )
     else:
-        groups = _group_words(visible_words, max_words=3)
+        groups = _group_words(visible_words, max_words=4)
         for group in groups:
             for active_idx, active_word in enumerate(group):
                 ev_start = active_word.start_ms
                 if active_idx + 1 < len(group):
-                    ev_end = max(ev_start + 60, group[active_idx + 1].start_ms)
+                    ev_end = max(active_word.end_ms, group[active_idx + 1].start_ms)
                 else:
-                    ev_end = max(ev_start + 60, active_word.end_ms)
+                    ev_end = max(ev_start + 60, group[-1].end_ms)
 
                 shown = group[: active_idx + 1] if reveal_mode == "progressive" else group
 
@@ -433,6 +495,7 @@ def generate_ass_subtitles(
                     f"Default,,0,0,0,,{line_text}"
                 )
 
+    events = _enforce_non_overlapping_dialogue(events)
     return "\n".join(header + events) + "\n"
 
 

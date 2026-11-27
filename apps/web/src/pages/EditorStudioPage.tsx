@@ -81,6 +81,9 @@ export function EditorStudioPage({
     setTranscribing(true);
     try {
       const res = await transport.transcribeProject(targetId, language);
+      if (res.sliceOriginMs !== undefined) {
+        useTimelineStore.getState().setSliceOriginMs(res.sliceOriginMs);
+      }
       applyAiPatchResult(res.edl, [
         `Auto-Captions: ${res.wordCount} words (${res.provider})`,
       ]);

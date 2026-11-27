@@ -15,6 +15,9 @@ from cutflow.edl import (
     apply_edl_patch,
     delete_word,
     insert_word,
+    set_clip_speed,
+    set_cold_open,
+    trim_clip_edges,
     update_word_timing,
 )
 
@@ -117,3 +120,45 @@ def test_insert_delete_word_and_edl_patch_with_revert_snapshot() -> None:
 
     with pytest.raises(ValueError):
         delete_word(edl, "does_not_exist")
+
+
+def test_cold_open_trim_and_speed_keep_subtitle_words_locked_to_source_audio() -> None:
+    edl = _load_fixture()
+    orig_mapper = TimelineMapper(edl)
+    # Record exact original source_ms spoken for every word in the fixture
+    orig_word_sources = {
+        w.id: orig_mapper.timeline_to_source(w.start_ms)[1]
+        for w in edl.tracks.subtitles.words
+    }
+
+    # 1. Disabling 1500ms cold-open must shift every word -1500ms so source_ms is identical!
+    no_co = set_cold_open(edl, enabled=False)
+    no_co_mapper = TimelineMapper(no_co)
+    assert no_co_mapper.cold_open_ms == 0
+    for w in no_co.tracks.subtitles.words:
+        assert no_co_mapper.timeline_to_source(w.start_ms) == (False, orig_word_sources[w.id])
+
+    # 2. Re-enabling 2200ms cold-open via apply_edl_patch shifts every word +2200ms!
+    re_co, _, _ = apply_edl_patch(
+        no_co,
+        [{"op": "set_cold_open", "enabled": True, "sourceStartMs": 24000, "durationMs": 2200}],
+    )
+    re_co_mapper = TimelineMapper(re_co)
+    assert re_co_mapper.cold_open_ms == 2200
+    for w in re_co.tracks.subtitles.words:
+        assert re_co_mapper.timeline_to_source(w.start_ms) == (False, orig_word_sources[w.id])
+
+    # 3. Trimming clip sourceStartMs inward (+1200ms) drops early words & shifts rest -1200ms!
+    clip_id = no_co.tracks.video.clips[0].id
+    trimmed = trim_clip_edges(no_co, clip_id, source_start_ms=11200)
+    trim_mapper = TimelineMapper(trimmed)
+    assert len(trimmed.tracks.subtitles.words) > 0
+    for w in trimmed.tracks.subtitles.words:
+        if orig_word_sources[w.id] >= 11200:
+            assert abs(trim_mapper.timeline_to_source(w.start_ms)[1] - orig_word_sources[w.id]) <= 2
+
+    # 4. Changing clip speed to 1.5x rescales word timestamps so spoken source_ms stays locked!
+    sped = set_clip_speed(no_co, clip_id, 1.5)
+    sped_mapper = TimelineMapper(sped)
+    for w in sped.tracks.subtitles.words:
+        assert abs(sped_mapper.timeline_to_source(w.start_ms)[1] - orig_word_sources[w.id]) <= 3

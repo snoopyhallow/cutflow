@@ -1,4 +1,4 @@
-"""Sequential clip-scoped forced alignment + 20ms RMS audio-onset word timing clamp."""
+"""AutoClip-parity word timing normalization + 20ms RMS audio-onset alignment."""
 
 from __future__ import annotations
 
@@ -23,21 +23,96 @@ class WordTiming:
     confidence: float | None = None
 
 
-def _frame_rms_envelope(wav_path: Path, window_ms: int = 20) -> tuple[np.ndarray, int]:
-    """Compute mono RMS energy in ``window_ms`` buckets. Returns ``(rms_array, window_ms)``."""
-    sr, samples = read_mono_pcm_f32(wav_path)
-    if samples.size == 0 or sr <= 0:
-        return np.zeros(0, dtype=np.float32), window_ms
+def normalize_word_timings(
+    words: list[WordTiming],
+    *,
+    min_word_ms: int = 120,
+) -> list[WordTiming]:
+    """Return strictly monotonic, non-overlapping word timings (ported from AutoClip).
 
-    step = max(1, int(round(sr * (window_ms / 1000.0))))
-    usable = (samples.size // step) * step
-    if usable == 0:
-        val = float(np.sqrt(np.mean(samples * samples)))
-        return np.array([val], dtype=np.float32), window_ms
+    Whisper occasionally collapses consecutive rapid words onto the exact same timestamp
+    (e.g. ``7020 -> 7020``). Spreading tied/collapsed runs proportionally across their
+    available span before the next word prevents cascading rightward drift across a clip.
+    """
+    if not words:
+        return []
 
-    blocks = samples[:usable].reshape(-1, step)
-    rms = np.sqrt(np.mean(blocks * blocks, axis=1)).astype(np.float32)
-    return rms, window_ms
+    result = [
+        WordTiming(
+            text=w.text,
+            start_ms=max(0, int(w.start_ms)),
+            end_ms=max(max(0, int(w.start_ms)), int(w.end_ms)),
+            speaker=w.speaker,
+            confidence=w.confidence,
+        )
+        for w in words
+    ]
+
+    n = len(result)
+    i = 0
+    while i < n:
+        j = i
+        run_start = result[i].start_ms
+        run_max_end = result[i].end_ms
+        while j + 1 < n and result[j + 1].start_ms <= run_start + 1:
+            j += 1
+            if result[j].end_ms > run_max_end:
+                run_max_end = result[j].end_ms
+
+        if j > i:
+            next_start = result[j + 1].start_ms if j + 1 < n else None
+            count = j - i + 1
+            if run_max_end > run_start + 1:
+                run_end = run_max_end
+                if next_start is not None and next_start > run_start:
+                    run_end = min(run_end, next_start)
+            elif next_start is not None and next_start > run_start:
+                run_end = min(next_start, run_start + count * 250)
+            else:
+                run_end = run_start + count * min_word_ms
+
+            weights = [max(1, len(result[k].text.strip())) for k in range(i, j + 1)]
+            total_weight = sum(weights)
+            span = max(10 * count, run_end - run_start)
+            cursor = run_start
+            for offset, k in enumerate(range(i, j + 1)):
+                if k == j:
+                    slice_end = run_end
+                else:
+                    slice_end = cursor + int(round(span * (weights[offset] / total_weight)))
+                result[k].start_ms = cursor
+                result[k].end_ms = max(cursor, slice_end)
+                cursor = result[k].end_ms
+            i = j + 1
+        else:
+            i += 1
+
+    # Enforce strict non-overlap without pushing subsequent words past their real starts
+    for idx, word in enumerate(result):
+        if idx > 0 and word.start_ms < result[idx - 1].end_ms:
+            prev = result[idx - 1]
+            if word.start_ms > prev.start_ms:
+                prev.end_ms = word.start_ms
+            else:
+                word.start_ms = prev.end_ms
+        if word.end_ms < word.start_ms:
+            word.end_ms = word.start_ms
+
+    # Apply readable minimum duration ONLY into genuine free space before the next word
+    floor_ms = max(60, int(min_word_ms))
+    for idx, word in enumerate(result):
+        target_end = word.start_ms + floor_ms
+        if idx + 1 < n:
+            next_start = result[idx + 1].start_ms
+            if word.end_ms > next_start:
+                word.end_ms = max(word.start_ms + 40, next_start)
+            target_end = min(target_end, next_start)
+        if word.end_ms < target_end:
+            word.end_ms = target_end
+        if word.end_ms <= word.start_ms:
+            word.end_ms = word.start_ms + 40
+
+    return result
 
 
 def align_words_to_audio(
@@ -45,80 +120,74 @@ def align_words_to_audio(
     wav_path: Path,
     *,
     window_ms: int = 20,
-    max_shift_ms: int = 1800,
-    onset_ratio: float = 0.22,
-    min_word_ms: int = 60,
+    min_stretch_ms: int = 350,
+    min_word_ms: int = 120,
 ) -> list[WordTiming]:
-    """Clamp Whisper silence-stretched word timestamps onto real 20ms speech energy onsets.
+    """Snap Whisper silence-stretched word starts/ends onto measured voice energy (AutoClip parity).
 
-    Eliminates the classic 0.5-2.0s early subtitle pop-in where ASR stretches the first word
-    of an utterance backwards across dead air before the speaker actually talks.
+    Whisper frequently stretches the first word after a pause 0.5-2.5s backwards into silence
+    or lets the last word linger into trailing silence. By only clamping words wider than
+    ``min_stretch_ms`` and walking backwards from the active vocal core across natural <=240ms
+    consonant dips, normal rapid speech stays untouched while pre-speech early pop-ins disappear.
     """
-    if not words:
-        return []
+    if not words or not wav_path.is_file():
+        return normalize_word_timings(words, min_word_ms=min_word_ms)
 
-    rms, step_ms = _frame_rms_envelope(wav_path, window_ms=window_ms)
-    if rms.size == 0:
-        return list(words)
+    sr, samples = read_mono_pcm_f32(wav_path)
+    if samples.size == 0 or sr <= 0:
+        return normalize_word_timings(words, min_word_ms=min_word_ms)
 
-    noise_floor = float(np.percentile(rms, 15))
-    global_peak = float(np.percentile(rms, 95))
-    if global_peak <= noise_floor + 1e-5:
-        return list(words)
+    bin_ms = max(10, int(window_ms))
+    step = max(1, int(round(sr * (bin_ms / 1000.0))))
+    n_bins = int(samples.size // step)
+    if n_bins < 5:
+        return normalize_word_timings(words, min_word_ms=min_word_ms)
+
+    rms = np.sqrt(np.mean(samples[: n_bins * step].reshape(n_bins, step) ** 2, axis=1)).astype(
+        np.float32
+    )
+    global_floor = float(np.percentile(rms, 15))
+    bridge_bins = max(1, int(round(240 / bin_ms)))  # 240ms intra-word consonant dip bridge
+    context_bins = max(10, int(round(4000 / bin_ms)))  # ±4.0s local noise floor window
 
     aligned: list[WordTiming] = []
-    n_frames = int(rms.size)
-
     for w in words:
-        start_ms = max(0, int(w.start_ms))
-        end_ms = max(start_ms + min_word_ms, int(w.end_ms))
-
-        f0 = max(0, min(n_frames - 1, start_ms // step_ms))
-        f1 = max(f0 + 1, min(n_frames, (end_ms + step_ms - 1) // step_ms))
-        segment = rms[f0:f1]
-
-        if segment.size >= 3:
-            local_peak = float(np.max(segment))
-            threshold = max(
-                noise_floor * 2.2,
-                noise_floor + (local_peak - noise_floor) * onset_ratio,
-                noise_floor + (global_peak - noise_floor) * 0.08,
-            )
-
-            # Snap start forward if the opening frame(s) are silent dead air
-            if float(segment[0]) < threshold and local_peak >= threshold:
-                above = np.flatnonzero(segment >= threshold)
-                if above.size > 0:
-                    onset_offset_frames = int(above[0])
-                    if onset_offset_frames > 0:
-                        candidate_start = (f0 + onset_offset_frames) * step_ms - step_ms
-                        candidate_start = min(candidate_start, start_ms + max_shift_ms)
-                        candidate_start = min(candidate_start, end_ms - min_word_ms)
-                        if candidate_start > start_ms:
-                            start_ms = candidate_start
-
-            # Trim excessive trailing dead air (>400ms past last speech frame)
-            above_all = np.flatnonzero(segment >= threshold * 0.85)
-            if above_all.size > 0:
-                last_active_ms = (f0 + int(above_all[-1]) + 1) * step_ms + 160
-                if end_ms - last_active_ms > 400:
-                    end_ms = max(start_ms + min_word_ms, last_active_ms)
-
-        if aligned and start_ms < aligned[-1].end_ms:
-            start_ms = aligned[-1].end_ms
-            end_ms = max(start_ms + min_word_ms, end_ms)
+        s_ms = max(0, int(w.start_ms))
+        e_ms = max(s_ms, int(w.end_ms))
+        if (e_ms - s_ms) > min_stretch_ms:
+            b0 = max(0, min(n_bins - 1, s_ms // bin_ms))
+            b1 = min(n_bins, (e_ms // bin_ms) + 1)
+            seg = rms[b0:b1]
+            if seg.size >= 5:
+                peak = float(np.max(seg))
+                lo0 = max(0, b0 - context_bins)
+                lo1 = min(n_bins, b1 + context_bins)
+                local_floor = float(np.percentile(rms[lo0:lo1], 15))
+                thresh = max(0.020, max(global_floor, local_floor) * 2.5, peak * 0.20)
+                active = np.flatnonzero(seg >= thresh)
+                if active.size > 0:
+                    last_a = int(active[-1])
+                    run_start = last_a
+                    k = int(active.size) - 2
+                    while k >= 0 and int(active[k + 1] - active[k]) <= bridge_bins:
+                        run_start = int(active[k])
+                        k -= 1
+                    new_s = (b0 + run_start) * bin_ms - 40
+                    new_e = (b0 + last_a + 1) * bin_ms + 60
+                    s_ms = max(s_ms, min(e_ms - min_word_ms, new_s))
+                    e_ms = min(e_ms, max(s_ms + min_word_ms, new_e))
 
         aligned.append(
             WordTiming(
                 text=w.text,
-                start_ms=start_ms,
-                end_ms=end_ms,
+                start_ms=s_ms,
+                end_ms=max(s_ms + 40, e_ms),
                 speaker=w.speaker,
                 confidence=w.confidence,
             )
         )
 
-    return aligned
+    return normalize_word_timings(aligned, min_word_ms=min_word_ms)
 
 
 def run_clip_scoped_alignment(

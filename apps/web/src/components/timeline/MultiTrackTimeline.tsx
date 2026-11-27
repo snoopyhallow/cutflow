@@ -335,7 +335,15 @@ export function MultiTrackTimeline({
 
     function maybeSnap(ms: number): number {
       if (!snapToWaveform || !peaks || peaks.peaks.length === 0) return ms;
-      return snapToNearestOnsetMs(ms, peaks.peaks, peaks.rateHz, 120);
+      const coOffset =
+        peaks.durationMs < totalDurationMs - 200 ? coldOpenMs : 0;
+      const snappedSampleMs = snapToNearestOnsetMs(
+        Math.max(0, ms - coOffset),
+        peaks.peaks,
+        peaks.rateHz,
+        120,
+      );
+      return snappedSampleMs + coOffset;
     }
 
     function onMove(ev: PointerEvent) {

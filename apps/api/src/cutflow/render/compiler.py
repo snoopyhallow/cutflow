@@ -382,7 +382,9 @@ def compile_edl_to_ffmpeg(
         )
         rel_start_s = max(0.0, (seg.source_start_ms - seg_origin_ms) / 1000.0)
         read_dur_s = (
-            0.12 if seg.freeze_duration_ms > 0 else max(0.1, seg.raw_source_duration_ms / 1000.0)
+            0.12
+            if seg.freeze_duration_ms > 0
+            else max(0.1, seg.raw_source_duration_ms / 1000.0) + 0.08
         )
         in_idx = next_input_idx
         next_input_idx += 1
@@ -400,7 +402,10 @@ def compile_edl_to_ffmpeg(
                 v_chain += ",reverse,setpts=PTS-STARTPTS"
             if abs(seg.speed - 1.0) >= 0.005:
                 v_chain += f",setpts=PTS/{seg.speed:.4f}"
-            v_chain += f",fps={fps},setsar=1"
+            v_chain += (
+                f",fps={fps},tpad=stop_mode=clone:stop_duration=0.08,"
+                f"trim=0:{dur_s:.3f},setpts=PTS-STARTPTS,setsar=1"
+            )
 
         if needs_norm_scale:
             v_chain += f",scale={base_src_w}:{base_src_h},format=yuv420p,setsar=1"

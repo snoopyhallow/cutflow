@@ -1,6 +1,11 @@
 """Audio/media utilities: FFprobe, 5.1 mix, BGM/SFX, embedded SRT, WAV, peaks, slices & aligner."""
 
-from .align import WordTiming, align_words_to_audio, run_clip_scoped_alignment
+from .align import (
+    WordTiming,
+    align_words_to_audio,
+    normalize_word_timings,
+    run_clip_scoped_alignment,
+)
 from .bgm import (
     AUDIO_EXTENSIONS,
     BgmAsset,
@@ -60,6 +65,7 @@ __all__ = [
     "lang_matches",
     "list_bgm_assets",
     "load_sidecar_subtitle_file",
+    "normalize_word_timings",
     "parse_subtitle_text",
     "probe_media",
     "read_mono_pcm_f32",

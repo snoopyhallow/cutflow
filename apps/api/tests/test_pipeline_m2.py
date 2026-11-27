@@ -26,6 +26,7 @@ from cutflow.audio import (
     compute_peaks_100hz,
     extract_lossless_clip_slice,
     extract_wav_16k,
+    normalize_word_timings,
     probe_media,
 )
 from cutflow.db import JobRow, SourceRow, get_session
@@ -187,6 +188,76 @@ def test_llm_auto_selects_configured_claude_key_and_compatible_model(
     assert res == {"ok": True}
     assert captured["api_key"] == "sk-ant-test-key"
     assert captured["model"].startswith("claude")
+
+
+def test_normalize_word_timings_spreads_collapsed_runs_without_rightward_drift() -> None:
+    collapsed = [
+        WordTiming(text="Wait", start_ms=7020, end_ms=7020),
+        WordTiming(text="what", start_ms=7020, end_ms=7020),
+        WordTiming(text="happened", start_ms=7020, end_ms=7480),
+        WordTiming(text="next?", start_ms=7520, end_ms=7900),
+    ]
+    norm = normalize_word_timings(collapsed)
+    assert [w.text for w in norm] == ["Wait", "what", "happened", "next?"]
+    for i in range(len(norm) - 1):
+        assert norm[i].end_ms <= norm[i + 1].start_ms
+    # Must never push "next?" past its real acoustic start at 7520ms!
+    assert norm[3].start_ms == 7520
+
+
+@pytest.mark.skipif(not HAS_FFMPEG, reason="ffmpeg/ffprobe required")
+def test_clip_slice_mid_gop_cut_is_frame_accurate_without_keyframe_snap_drift(
+    tmp_path: Path,
+) -> None:
+    ffmpeg = shutil.which("ffmpeg")
+    assert ffmpeg is not None
+    # Sparse 10-second single-keyframe (-g 300) video: -c:v copy would snap 3.7s back to 0.0s!
+    sparse_mp4 = tmp_path / "sparse_gop.mp4"
+    subprocess.run(
+        [
+            ffmpeg,
+            "-hide_banner",
+            "-loglevel",
+            "error",
+            "-y",
+            "-f",
+            "lavfi",
+            "-i",
+            "testsrc2=size=640x360:rate=30:duration=10",
+            "-f",
+            "lavfi",
+            "-i",
+            "sine=frequency=440:sample_rate=44100:duration=10",
+            "-c:v",
+            "libx264",
+            "-preset",
+            "ultrafast",
+            "-g",
+            "300",
+            "-keyint_min",
+            "300",
+            "-sc_threshold",
+            "0",
+            "-pix_fmt",
+            "yuv420p",
+            "-c:a",
+            "aac",
+            str(sparse_mp4),
+        ],
+        check=True,
+    )
+    slice_path, origin_ms = extract_lossless_clip_slice(
+        sparse_mp4,
+        tmp_path / "exact_slice.mp4",
+        clip_start_ms=4700,
+        clip_end_ms=7700,
+        handle_ms=1000,
+        source_duration_ms=10_000,
+    )
+    assert origin_ms == 3700
+    probed = probe_media(slice_path)
+    # Expected slice span = [3700ms .. 8700ms] = 5000ms (with -c copy it would bloat to ~8700ms!)
+    assert 4850 <= probed.duration_ms <= 5150, f"Got {probed.duration_ms}ms (keyframe drift!)"
 
 
 @pytest.mark.skipif(not HAS_FFMPEG, reason="ffmpeg/ffprobe required")

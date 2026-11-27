@@ -340,13 +340,15 @@ def extract_lossless_clip_slice(
     video_codec: str = "h264",
     center_dialogue_boost: bool = False,
 ) -> tuple[Path, int]:
-    """Create a fast MP4 clip slice with browser-safe stereo AAC for .mkv/5.1 sources.
+    """Create a frame-accurate MP4 clip slice with exact ``slice_start_ms`` origin and stereo AAC.
 
-    Preserves zero-copy `-c:v copy` (and `-c:a copy` when already stereo AAC), while
-    automatically transcoding AC-3/DTS/FLAC/5.1 movie audio to 192k stereo AAC with
-    Front-Center dialogue isolation so browser `<video>` preview and post-archive exports
-    never go silent.
+    Note: ``-ss ... -i ... -c:v copy`` snaps backwards to the preceding source keyframe (up to
+    2-5s early on YouTube AV1/H.264 streams), causing multi-second subtitle-to-audio desync in
+    the Studio preview and post-archive exports. Decoding and encoding with ``libx264 -preset
+    ultrafast -crf 20 -g 30`` guarantees ``t=0.000s`` in ``clip_slice.mp4`` equals exact
+    ``slice_start_ms`` with 1-second keyframes for instant NLE scrubbing.
     """
+    _ = (audio_codec, video_codec)
     ffmpeg = _require_binary("ffmpeg")
     out_path.parent.mkdir(parents=True, exist_ok=True)
 
@@ -356,13 +358,6 @@ def extract_lossless_clip_slice(
         slice_end = min(source_duration_ms, slice_end)
     slice_dur = max(500, slice_end - slice_start)
 
-    v_copy = video_codec.strip().lower() in _COPY_SAFE_MP4_VIDEO_CODECS or not video_codec
-    a_can_copy = (
-        audio_codec.strip().lower() == "aac"
-        and audio_channels <= 2
-        and not center_dialogue_boost
-    )
-
     cmd = [
         ffmpeg,
         "-hide_banner",
@@ -371,43 +366,47 @@ def extract_lossless_clip_slice(
         "-y",
         "-ss",
         f"{slice_start / 1000.0:.3f}",
-        "-i",
-        str(source_path),
         "-t",
         f"{slice_dur / 1000.0:.3f}",
+        "-i",
+        str(source_path),
         "-map",
         "0:v:0",
         "-map",
         f"0:a:{max(0, int(audio_rel_index))}?",
+        "-c:v",
+        "libx264",
+        "-preset",
+        "ultrafast",
+        "-crf",
+        "20",
+        "-g",
+        "30",
+        "-pix_fmt",
+        "yuv420p",
     ]
 
-    if v_copy:
-        cmd.extend(["-c:v", "copy"])
+    fc_pan = dialogue_downmix_filter(audio_channels) if center_dialogue_boost else None
+    if fc_pan:
+        cmd.extend(["-af", fc_pan])
     else:
-        cmd.extend(["-c:v", "libx264", "-preset", "veryfast", "-crf", "20", "-pix_fmt", "yuv420p"])
-
-    if a_can_copy:
-        cmd.extend(["-c:a", "copy"])
-    else:
-        fc_pan = dialogue_downmix_filter(audio_channels) if center_dialogue_boost else None
-        if fc_pan:
-            cmd.extend(["-af", fc_pan])
-        else:
-            cmd.extend(["-ac", "2"])
-        cmd.extend(["-c:a", "aac", "-b:a", "192k", "-ar", "48000"])
-
+        cmd.extend(["-ac", "2"])
     cmd.extend(
         [
+            "-c:a",
+            "aac",
+            "-b:a",
+            "192k",
+            "-ar",
+            "48000",
             "-movflags",
             "+faststart",
-            "-avoid_negative_ts",
-            "make_zero",
             str(out_path),
         ]
     )
-    proc = subprocess.run(cmd, capture_output=True, text=True, timeout=180, check=False)
+    proc = subprocess.run(cmd, capture_output=True, text=True, timeout=240, check=False)
     if proc.returncode != 0 or not out_path.is_file() or out_path.stat().st_size == 0:
-        raise MediaError(f"Lossless clip slice failed: {proc.stderr.strip()}")
+        raise MediaError(f"Clip slice extraction failed: {proc.stderr.strip()}")
     return out_path, slice_start
 
 

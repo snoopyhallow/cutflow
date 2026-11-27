@@ -50,7 +50,11 @@ const DEFAULT_NEON_PALETTE = [
   "#F87171",
 ];
 
-import { dbToLinearGain, formatDbLabel } from "../../utils/audioMath";
+import {
+  computeMediaSliceSeekSec,
+  dbToLinearGain,
+  formatDbLabel,
+} from "../../utils/audioMath";
 
 export { dbToLinearGain, formatDbLabel };
 
@@ -60,28 +64,46 @@ const mediaGainNodeMap = new WeakMap<
 >();
 let sharedAudioContext: AudioContext | null = null;
 
-function ensureElementGainNode(
-  el: HTMLMediaElement | null,
-): { ctx: AudioContext; gain: GainNode } | null {
-  if (!el || typeof window === "undefined") return null;
-  const existing = mediaGainNodeMap.get(el);
-  if (existing) return existing;
-
+function getOrCreateAudioContext(): AudioContext | null {
+  if (typeof window === "undefined") return null;
+  if (sharedAudioContext) return sharedAudioContext;
   const AudioCtx =
     window.AudioContext ||
     (window as unknown as { webkitAudioContext?: typeof AudioContext })
       .webkitAudioContext;
   if (!AudioCtx) return null;
+  try {
+    sharedAudioContext = new AudioCtx();
+    return sharedAudioContext;
+  } catch {
+    return null;
+  }
+}
+
+function ensureElementGainNode(
+  el: HTMLMediaElement | null,
+): { ctx: AudioContext; gain: GainNode } | null {
+  if (!el || typeof window === "undefined") return null;
+  const existing = mediaGainNodeMap.get(el);
+  if (existing) {
+    if (existing.ctx.state === "suspended") {
+      void existing.ctx.resume().catch(() => undefined);
+    }
+    return existing;
+  }
+
+  const ctx = getOrCreateAudioContext();
+  if (!ctx) return null;
 
   try {
-    if (!sharedAudioContext) {
-      sharedAudioContext = new AudioCtx();
+    if (ctx.state === "suspended") {
+      void ctx.resume().catch(() => undefined);
     }
-    const source = sharedAudioContext.createMediaElementSource(el);
-    const gain = sharedAudioContext.createGain();
+    const source = ctx.createMediaElementSource(el);
+    const gain = ctx.createGain();
     source.connect(gain);
-    gain.connect(sharedAudioContext.destination);
-    const entry = { ctx: sharedAudioContext, gain };
+    gain.connect(ctx.destination);
+    const entry = { ctx, gain };
     mediaGainNodeMap.set(el, entry);
     return entry;
   } catch {
@@ -106,8 +128,9 @@ function applyLiveElementGain(el: HTMLMediaElement, linearGain: number): void {
 }
 
 function resumeWebAudioIfNeeded(): void {
-  if (sharedAudioContext && sharedAudioContext.state === "suspended") {
-    void sharedAudioContext.resume().catch(() => undefined);
+  const ctx = getOrCreateAudioContext();
+  if (ctx && ctx.state === "suspended") {
+    void ctx.resume().catch(() => undefined);
   }
 }
 
@@ -393,7 +416,17 @@ export function StudioStage({
     return [360, 640];
   }, [edl?.output.ratio]);
 
-  // Resume WebAudio context whenever playback starts
+  // Unlock WebAudio context on any user pointer/key gesture and whenever playback starts
+  useEffect(() => {
+    const unlock = () => resumeWebAudioIfNeeded();
+    window.addEventListener("pointerdown", unlock, { passive: true });
+    window.addEventListener("keydown", unlock, { passive: true });
+    return () => {
+      window.removeEventListener("pointerdown", unlock);
+      window.removeEventListener("keydown", unlock);
+    };
+  }, []);
+
   useEffect(() => {
     if (isPlaying) {
       resumeWebAudioIfNeeded();
@@ -533,7 +566,15 @@ export function StudioStage({
       if (brEl && curBroll && activeBrollUrl) {
         const brElapsed = nextMs - curBroll.timelineStartMs;
         const brSpd = Math.max(0.25, curBroll.speed ?? 1);
-        const brSec = (curBroll.sourceStartMs + brElapsed * brSpd) / 1000;
+        const brSec = computeMediaSliceSeekSec({
+          sourceStartMs: curBroll.sourceStartMs,
+          elapsedTimelineMs: brElapsed,
+          speed: brSpd,
+          clipSourceId: curBroll.sourceId,
+          projectSourceId: currentEdl.sourceId,
+          hasProjectMediaUrl: Boolean(mediaUrl),
+          sliceOriginMs: state.sliceOriginMs,
+        });
         const brGain =
           muted || (curBroll.muted ?? true)
             ? 0
@@ -569,7 +610,16 @@ export function StudioStage({
         const axElapsed = nextMs - curAux.timelineStartMs;
         const axDur = getAudioClipDurationMs(curAux);
         const axSpd = Math.max(0.25, curAux.speed ?? 1);
-        const axSec = (curAux.sourceStartMs + axElapsed * axSpd) / 1000;
+        const axSec = computeMediaSliceSeekSec({
+          sourceStartMs: curAux.sourceStartMs,
+          elapsedTimelineMs: axElapsed,
+          speed: axSpd,
+          clipSourceId: curAux.sourceId,
+          assetId: curAux.assetId,
+          projectSourceId: currentEdl.sourceId,
+          hasProjectMediaUrl: Boolean(mediaUrl),
+          sliceOriginMs: state.sliceOriginMs,
+        });
         let axLinear = dbToLinearGain(curAux.gainDb ?? 0);
         if (curAux.kind === "detached") {
           axLinear *= isVoiceTrackMuted ? 0 : dbToLinearGain(audCfg.gainDb);

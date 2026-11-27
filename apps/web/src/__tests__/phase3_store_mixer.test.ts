@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 import {
+  computeMediaSliceSeekSec,
   dbToLinearGain,
   formatDbLabel,
 } from "../utils/audioMath";
@@ -98,6 +99,32 @@ describe("Phase 3 WebAudio Gain Math & Labels", () => {
     expect(formatDbLabel(0)).toBe("+0.0 dB");
     expect(formatDbLabel(-18.5)).toBe("-18.5 dB");
     expect(formatDbLabel(6)).toBe("+6.0 dB");
+
+    // Detached audio from a sliced VOD clip must subtract sliceOriginMs so <audio> seeks inside slice.mp4
+    expect(
+      computeMediaSliceSeekSec({
+        sourceStartMs: 135_000,
+        elapsedTimelineMs: 2_500,
+        speed: 1,
+        clipSourceId: "src_main",
+        projectSourceId: "src_main",
+        hasProjectMediaUrl: true,
+        sliceOriginMs: 135_000,
+      }),
+    ).toBeCloseTo(2.5, 4);
+
+    // SFX or external audio clip ignores sliceOriginMs
+    expect(
+      computeMediaSliceSeekSec({
+        sourceStartMs: 0,
+        elapsedTimelineMs: 400,
+        speed: 1,
+        assetId: "whoosh_flash",
+        projectSourceId: "src_main",
+        hasProjectMediaUrl: true,
+        sliceOriginMs: 135_000,
+      }),
+    ).toBeCloseTo(0.4, 4);
   });
 });
 
